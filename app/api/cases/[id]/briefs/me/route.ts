@@ -1,6 +1,11 @@
 import { NextResponse } from "next/server"
 import { z } from "zod"
-import { getMyBrief, upsertBrief, BriefError } from "@/lib/cases/service"
+import {
+  getMyBrief,
+  upsertBrief,
+  BriefError,
+  sealedBriefSchema,
+} from "@/lib/cases/service"
 import { requireSession, UnauthorizedError } from "@/lib/auth/session"
 
 export async function GET(
@@ -22,7 +27,12 @@ export async function GET(
   }
 }
 
-const bodySchema = z.object({ body: z.string().min(1).max(8_000) })
+// Accept either a plaintext body or a sealed (encrypted) payload. Exactly
+// one of `body` or `sealed` must be present.
+const requestSchema = z.union([
+  z.object({ body: z.string().min(1).max(8_000) }),
+  z.object({ sealed: sealedBriefSchema }),
+])
 
 export async function PUT(
   req: Request,
@@ -31,11 +41,11 @@ export async function PUT(
   try {
     const { id } = await params
     const session = await requireSession()
-    const parsed = bodySchema.parse(await req.json())
+    const parsed = requestSchema.parse(await req.json())
     const result = await upsertBrief({
       caseUuid: id,
       authorAddress: session.address,
-      body: parsed.body,
+      ...("body" in parsed ? { body: parsed.body } : { sealed: parsed.sealed }),
     })
     return NextResponse.json(result)
   } catch (err) {

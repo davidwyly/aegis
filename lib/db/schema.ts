@@ -12,6 +12,7 @@ import {
   uniqueIndex,
   primaryKey,
   customType,
+  jsonb,
 } from "drizzle-orm/pg-core"
 import { sql, type InferSelectModel, type InferInsertModel } from "drizzle-orm"
 
@@ -97,6 +98,30 @@ export const arbiters = pgTable(
     pk: primaryKey({ columns: [t.chainId, t.address] }),
     statusIdx: index("arbiters_status_idx").on(t.chainId, t.status),
   }),
+)
+
+// ============================================================
+// Arbiter encryption keys — public X25519 key each panelist (or party)
+// publishes once, derived deterministically from a signature over a
+// fixed message. Lets brief authors seal an AES-256-GCM body key to
+// each recipient. Signature is stored so anyone can verify the pubkey
+// was registered by the matching wallet.
+// ============================================================
+
+export const arbiterKeys = pgTable(
+  "arbiter_keys",
+  {
+    address: text("address").primaryKey(), // lowercase 0x — one keypair per address
+    pubkey: text("pubkey").notNull(), // 32-byte X25519 public key, 0x-prefixed hex
+    signature: text("signature").notNull(), // proof of ownership (signature over the registration message)
+    registeredAt: timestamp("registered_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  () => ({}),
 )
 
 // ============================================================
@@ -268,7 +293,14 @@ export const briefs = pgTable(
       .references(() => cases.id, { onDelete: "cascade" }),
     authorAddress: text("author_address").notNull(),
     role: text("role").notNull(), // 'partyA' | 'partyB'
-    body: text("body").notNull(),
+    // Plaintext body. Empty string when the brief is encrypted.
+    body: text("body").notNull().default(""),
+    // Encrypted-brief support: when isEncrypted is true, `body` is empty
+    // and `sealed` holds the SealedBrief JSON (per-recipient wrapped AES
+    // key + AES-GCM body ciphertext). v1 alpha: encrypted briefs are NOT
+    // versioned in brief_versions.
+    isEncrypted: boolean("is_encrypted").notNull().default(false),
+    sealed: jsonb("sealed"),
     submittedAt: timestamp("submitted_at", { withTimezone: true })
       .notNull()
       .defaultNow(),

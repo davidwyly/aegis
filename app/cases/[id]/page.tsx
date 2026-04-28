@@ -17,6 +17,7 @@ import { CaseTimeline } from "@/components/case-timeline"
 import { assembleTimeline } from "@/lib/cases/timeline"
 import { AppealButton } from "@/components/appeal-button"
 import { getChainData } from "@/lib/chains"
+import { EncryptedBriefViewer } from "@/components/encrypted-brief-viewer"
 import { getExplorerAddressUrl } from "@/lib/chains"
 
 // Always server-render — the case state, panel, and brief visibility
@@ -230,7 +231,11 @@ export default async function CaseDetailPage({
             resolves.
           </p>
           <div className="mt-3">
-            <BriefEditor caseId={c.id} />
+            <BriefEditor
+              caseId={c.id}
+              panelistAddresses={panel.map((p) => p.panelistAddress)}
+              authorAddress={viewer ?? ""}
+            />
           </div>
         </section>
       )}
@@ -277,8 +282,17 @@ export default async function CaseDetailPage({
                           edited {editCount}×
                         </span>
                       )}
+                      {b.isEncrypted && (
+                        <span className="ml-2 italic text-purple-700 dark:text-purple-300">
+                          🔒 encrypted
+                        </span>
+                      )}
                     </div>
-                    <pre className="mt-1 whitespace-pre-wrap text-sm">{b.body}</pre>
+                    {b.isEncrypted ? (
+                      <EncryptedBriefViewer sealed={b.sealed as any} />
+                    ) : (
+                      <pre className="mt-1 whitespace-pre-wrap text-sm">{b.body}</pre>
+                    )}
                     {isResolved && history.versions.length > 0 && (
                       <details className="mt-2 text-xs text-zinc-500">
                         <summary className="cursor-pointer hover:underline">

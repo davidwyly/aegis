@@ -1,5 +1,61 @@
 # Changelog
 
+## v0.3.0 — encrypted briefs (unreleased)
+
+### Added
+- **Hybrid encryption for briefs.** Optional opt-in. AES-256-GCM
+  for the body, X25519 ECDH + HKDF-SHA256 wrapping the AES key
+  per recipient. End-to-end client-side; the server only sees
+  ciphertexts.
+- **Deterministic keypair derivation.** Each arbiter / party signs
+  a fixed registration message (`Aegis encryption key v1`) once;
+  `sha256(signature)` becomes the X25519 private key. Same wallet
+  on a different device re-derives the same keypair with another
+  signature.
+- **`arbiter_keys` table.** Stores `(address, pubkey, signature,
+  registeredAt)`. The signature is verified server-side against
+  the claimed address via `viem.recoverMessageAddress` AND the
+  pubkey is verified to match what `deriveX25519Keypair(signature)`
+  produces, so an attacker can't post someone else's signature
+  with their own pubkey.
+- **`POST /api/arbiters/me/pubkey`** for self-registration,
+  **`GET /api/arbiters/keys?address=...`** for bulk lookup (max
+  100 per request).
+- **`<ConfigureEncryption>` widget** on the arbiter profile page
+  — only the owner can configure; sees existing pubkey if any.
+- **`<BriefEditor>` opt-in toggle.** When checked, the editor
+  fetches recipient pubkeys (panelists + author), seals the body
+  to all of them, and POSTs `{ sealed }` instead of `{ body }`.
+  Refuses to encrypt if any recipient hasn't configured.
+- **`<EncryptedBriefViewer>`** client component. Tries the cached
+  private key in `localStorage` first; if missing, prompts a
+  signature, derives the key, decrypts. Falls back to a "Connect
+  wallet" prompt for non-recipients.
+- **`briefs.is_encrypted` + `sealed jsonb`** columns. Encrypted
+  briefs do NOT version (the ciphertext changes per save because
+  of fresh nonces, so structural equality isn't meaningful).
+
+### Crypto deps
+- `@noble/curves`, `@noble/ciphers`, `@noble/hashes` — small,
+  audited, zero-runtime-deps. ~30kb total bundle.
+
+### Tests
+- 8 vitest specs covering keypair determinism, multi-recipient
+  round-trip, non-recipient rejection, body / wrapped-key
+  tamper detection, pubkey-matches-signature.
+- 23 vitest passing (was 15).
+
+### Notes
+- Encrypted briefs are NOT versioned in v1 alpha. Plaintext
+  briefs continue to version normally.
+- Panel changes (recusal / redraw) don't auto re-encrypt to the
+  new panelist. Author would need to re-save the brief — they'll
+  see the new panel in BriefEditor and the encrypt-and-save
+  button refreshes recipients automatically.
+- The decrypt UX caches private keys in localStorage per address
+  to avoid re-prompting. Standard wallet-derived-key model;
+  identical to many e2ee dapps.
+
 ## v0.2.0 — appeals layer (unreleased)
 
 ### Added

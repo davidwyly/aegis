@@ -2,6 +2,7 @@ import Link from "next/link"
 import { notFound } from "next/navigation"
 import { readArbiterProfile } from "@/lib/arbiters/profile"
 import { CaseStatusBadge } from "@/components/case-status-badge"
+import { ConfigureEncryption } from "@/components/configure-encryption"
 import { getExplorerAddressUrl } from "@/lib/chains"
 
 export const dynamic = "force-dynamic"
@@ -153,6 +154,20 @@ export default async function ArbiterProfilePage({
           </table>
         </section>
       )}
+
+      <section className="card">
+        <h2 className="text-sm font-medium uppercase tracking-wide text-zinc-500">
+          Encryption
+        </h2>
+        <p className="mt-1 text-xs text-zinc-500">
+          Public X25519 key. Lets parties seal encrypted briefs to this
+          arbiter. The signed registration message proves the wallet
+          owner derived the key.
+        </p>
+        <div className="mt-2">
+          <ConfigureEncryption ownerAddress={address} />
+        </div>
+      </section>
 
       {profile.declaredConflicts.length > 0 && (
         <section className="card">

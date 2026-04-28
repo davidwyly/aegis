@@ -320,10 +320,31 @@ export const briefBodySchema = z
   .min(1, "Brief is empty")
   .max(8_000, "Brief too long (8 KB max)")
 
+/** Sealed-brief shape — mirrors `lib/crypto/seal.ts`'s SealedBrief. */
+export const sealedBriefSchema = z.object({
+  bodyNonce: z.string().regex(/^0x[a-fA-F0-9]+$/),
+  bodyCiphertext: z.string().regex(/^0x[a-fA-F0-9]+$/),
+  recipients: z
+    .array(
+      z.object({
+        recipientPubkey: z.string().regex(/^0x[a-fA-F0-9]{64}$/),
+        ephemeralPubkey: z.string().regex(/^0x[a-fA-F0-9]{64}$/),
+        nonce: z.string().regex(/^0x[a-fA-F0-9]+$/),
+        wrapped: z.string().regex(/^0x[a-fA-F0-9]+$/),
+      }),
+    )
+    .min(1)
+    .max(20),
+})
+export type SealedBriefValue = z.infer<typeof sealedBriefSchema>
+
 export async function upsertBrief(opts: {
   caseUuid: string
   authorAddress: `0x${string}`
-  body: string
+  /** Plaintext body — required for plaintext briefs. */
+  body?: string
+  /** Sealed payload — required for encrypted briefs. */
+  sealed?: SealedBriefValue
 }) {
   // Determine role from the case
   const caseRow = await db.query.cases.findFirst({
@@ -336,7 +357,16 @@ export async function upsertBrief(opts: {
   else if (author === caseRow.partyB.toLowerCase()) role = "partyB"
   else throw new BriefError("NOT_PARTY")
 
-  const body = briefBodySchema.parse(opts.body)
+  const isEncrypted = !!opts.sealed
+  if (isEncrypted && opts.body) {
+    throw new Error("Pass either body or sealed, not both")
+  }
+  if (!isEncrypted) {
+    if (!opts.body) throw new Error("Brief body required")
+    briefBodySchema.parse(opts.body)
+  }
+  const body = isEncrypted ? "" : briefBodySchema.parse(opts.body!)
+  const sealed = isEncrypted ? sealedBriefSchema.parse(opts.sealed) : null
 
   const existing = await db.query.briefs.findFirst({
     where: (b, { eq, and }) =>
@@ -344,33 +374,51 @@ export async function upsertBrief(opts: {
   })
 
   if (existing) {
-    // Skip the no-op update so we don't pollute the history with
-    // duplicate versions when a user clicks Save without changing anything.
-    if (existing.body === body) {
+    // Skip the no-op update for plaintext briefs (don't pollute history
+    // when a user clicks Save without changing anything). For encrypted
+    // updates we always overwrite — the ciphertext changes per save
+    // because of fresh nonces, so structural equality isn't meaningful.
+    if (!isEncrypted && existing.body === body && !existing.isEncrypted) {
       return { id: existing.id, role, updated: false }
     }
-    // Snapshot the previous body before overwriting. Counts toward the
-    // version number; the new body is version N+1.
-    const priorVersions = await db
-      .select({ count: sql<number>`count(*)::int` })
-      .from(schema.briefVersions)
-      .where(eq(schema.briefVersions.briefId, existing.id))
-    const nextVersion = (priorVersions[0]?.count ?? 0) + 1
-    await db.insert(schema.briefVersions).values({
-      briefId: existing.id,
-      version: nextVersion,
-      body: existing.body,
-    })
+    // Plaintext-to-plaintext edit: snapshot the previous body into
+    // brief_versions so observers can see the edit history. Encrypted
+    // briefs are NOT versioned in v1 alpha — a future version could
+    // store ciphertext history alongside the wrapping keys.
+    if (!isEncrypted && !existing.isEncrypted) {
+      const priorVersions = await db
+        .select({ count: sql<number>`count(*)::int` })
+        .from(schema.briefVersions)
+        .where(eq(schema.briefVersions.briefId, existing.id))
+      const nextVersion = (priorVersions[0]?.count ?? 0) + 1
+      await db.insert(schema.briefVersions).values({
+        briefId: existing.id,
+        version: nextVersion,
+        body: existing.body,
+      })
+    }
     await db
       .update(schema.briefs)
-      .set({ body, updatedAt: new Date() })
+      .set({
+        body,
+        isEncrypted,
+        sealed,
+        updatedAt: new Date(),
+      })
       .where(eq(schema.briefs.id, existing.id))
     return { id: existing.id, role, updated: true }
   }
 
   const [row] = await db
     .insert(schema.briefs)
-    .values({ caseUuid: opts.caseUuid, authorAddress: author, role, body })
+    .values({
+      caseUuid: opts.caseUuid,
+      authorAddress: author,
+      role,
+      body,
+      isEncrypted,
+      sealed,
+    })
     .returning({ id: schema.briefs.id })
   return { id: row.id, role, updated: false }
 }
