@@ -254,7 +254,12 @@ export default async function CaseDetailPage({
             everything only after the case resolves.
           </p>
           <div className="mt-3">
-            <EvidencePanel caseId={c.id} canUpload={isParty} />
+            <EvidencePanel
+              caseId={c.id}
+              canUpload={isParty}
+              panelistAddresses={panel.map((p) => p.panelistAddress)}
+              authorAddress={viewer ?? ""}
+            />
           </div>
         </section>
       )}

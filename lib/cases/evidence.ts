@@ -15,12 +15,23 @@ export const EVIDENCE_ALLOWED_MIME = new Set<string>([
   "application/json",
 ])
 
+export interface SealedRecipient {
+  recipientPubkey: string
+  ephemeralPubkey: string
+  nonce: string
+  wrapped: string
+}
+
 export interface UploadEvidenceInput {
   caseUuid: string
   uploaderAddress: `0x${string}`
   fileName: string
   mimeType: string
+  /** Body bytes — plaintext when not encrypted, AES-GCM ciphertext when encrypted. */
   content: Buffer
+  /** Encryption metadata. Both fields required if either is present. */
+  bodyNonce?: string
+  sealedRecipients?: SealedRecipient[]
 }
 
 export interface EvidenceListItem {
@@ -33,6 +44,9 @@ export interface EvidenceListItem {
   size: number
   sha256: string
   uploadedAt: Date
+  isEncrypted: boolean
+  bodyNonce: string | null
+  sealedRecipients: SealedRecipient[] | null
 }
 
 export class EvidenceError extends Error {
@@ -78,6 +92,12 @@ export async function uploadEvidence(
 
   const sha256 = createHash("sha256").update(input.content).digest("hex")
 
+  // Either both encryption fields or neither.
+  const isEncrypted = !!(input.bodyNonce || input.sealedRecipients)
+  if (isEncrypted && (!input.bodyNonce || !input.sealedRecipients)) {
+    throw new Error("bodyNonce and sealedRecipients must both be present when encrypting")
+  }
+
   const [row] = await db
     .insert(schema.evidenceFiles)
     .values({
@@ -89,6 +109,9 @@ export async function uploadEvidence(
       size: input.content.length,
       sha256,
       content: input.content,
+      isEncrypted,
+      bodyNonce: input.bodyNonce ?? null,
+      sealedRecipients: input.sealedRecipients ?? null,
     })
     .returning({
       id: schema.evidenceFiles.id,
@@ -105,6 +128,9 @@ export async function uploadEvidence(
     size: input.content.length,
     sha256,
     uploadedAt: row.uploadedAt,
+    isEncrypted,
+    bodyNonce: input.bodyNonce ?? null,
+    sealedRecipients: input.sealedRecipients ?? null,
   }
 }
 
@@ -134,6 +160,9 @@ export async function listEvidenceForViewer(
       mimeType: schema.evidenceFiles.mimeType,
       size: schema.evidenceFiles.size,
       sha256: schema.evidenceFiles.sha256,
+      isEncrypted: schema.evidenceFiles.isEncrypted,
+      bodyNonce: schema.evidenceFiles.bodyNonce,
+      sealedRecipients: schema.evidenceFiles.sealedRecipients,
       uploadedAt: schema.evidenceFiles.uploadedAt,
     })
     .from(schema.evidenceFiles)

@@ -91,6 +91,71 @@ export interface SealedBrief {
 }
 
 /**
+ * Same hybrid scheme as `sealForRecipients`, but takes raw bytes
+ * (Uint8Array) for the body. Used by evidence-file encryption where
+ * the body is binary (PDF, image, etc.) — saves a UTF-8 round-trip.
+ *
+ * Returns the raw ciphertext bytes alongside the recipient blobs;
+ * caller is responsible for storage/transport.
+ */
+export function sealBytesForRecipients(
+  body: Uint8Array,
+  recipientPubkeys: readonly string[],
+): {
+  bodyNonce: `0x${string}`
+  bodyCiphertext: Uint8Array
+  recipients: SealedKey[]
+} {
+  const bodyKey = randomBytes(32)
+  const bodyNonce = randomBytes(12)
+  const bodyCiphertext = gcm(bodyKey, bodyNonce).encrypt(body)
+
+  const recipients = recipientPubkeys.map<SealedKey>((rpkHex) => {
+    const recipientPub = fromHex(rpkHex)
+    const ephemeralPriv = randomBytes(32)
+    const ephemeralPub = x25519.getPublicKey(ephemeralPriv)
+    const shared = x25519.getSharedSecret(ephemeralPriv, recipientPub)
+    const wrapKey = hkdf(sha256, shared, undefined, HKDF_INFO, 32)
+    const wrapNonce = randomBytes(12)
+    const wrapped = gcm(wrapKey, wrapNonce).encrypt(bodyKey)
+    return {
+      recipientPubkey: hex(recipientPub),
+      ephemeralPubkey: hex(ephemeralPub),
+      nonce: hex(wrapNonce),
+      wrapped: hex(wrapped),
+    }
+  })
+  return { bodyNonce: hex(bodyNonce), bodyCiphertext, recipients }
+}
+
+/**
+ * Decrypt a binary body sealed by `sealBytesForRecipients`. Caller
+ * supplies the recipient list + nonce that came alongside the
+ * ciphertext (typically from the server's evidence-list response).
+ */
+export function openBytesForViewer(
+  bodyCiphertext: Uint8Array,
+  bodyNonceHex: string,
+  recipients: SealedKey[],
+  viewerPrivateKey: string,
+): Uint8Array {
+  const myPriv = fromHex(viewerPrivateKey)
+  const myPub = x25519.getPublicKey(myPriv)
+  const myPubHex = hex(myPub).toLowerCase()
+
+  const slot = recipients.find(
+    (r) => r.recipientPubkey.toLowerCase() === myPubHex,
+  )
+  if (!slot) throw new Error("No sealed key for this viewer")
+
+  const ephemeralPub = fromHex(slot.ephemeralPubkey)
+  const shared = x25519.getSharedSecret(myPriv, ephemeralPub)
+  const wrapKey = hkdf(sha256, shared, undefined, HKDF_INFO, 32)
+  const bodyKey = gcm(wrapKey, fromHex(slot.nonce)).decrypt(fromHex(slot.wrapped))
+  return gcm(bodyKey, fromHex(bodyNonceHex)).decrypt(bodyCiphertext)
+}
+
+/**
  * Encrypt a brief body and seal the body key to each recipient's pubkey.
  * `recipientPubkeys` is the list of X25519 public keys (hex) that should
  * be able to decrypt — typically `[author, ...panelists]`.

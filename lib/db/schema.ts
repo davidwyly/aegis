@@ -357,8 +357,16 @@ export const evidenceFiles = pgTable(
     fileName: text("file_name").notNull(),
     mimeType: text("mime_type").notNull(),
     size: integer("size").notNull(),
-    sha256: text("sha256").notNull(), // hex digest, lets viewers verify
+    // sha256 of whatever is stored in `content` — i.e. the plaintext
+    // bytes for unencrypted files, the ciphertext for encrypted ones.
+    sha256: text("sha256").notNull(),
     content: bytea("content").notNull(),
+    // Encrypted-evidence support — same shape as encrypted briefs.
+    // When isEncrypted, `content` holds AES-256-GCM ciphertext, and
+    // sealedRecipients carries the per-recipient wrapped key blobs.
+    isEncrypted: boolean("is_encrypted").notNull().default(false),
+    bodyNonce: text("body_nonce"), // 12-byte AES-GCM nonce, hex
+    sealedRecipients: jsonb("sealed_recipients"), // SealedKey[] from lib/crypto/seal
     uploadedAt: timestamp("uploaded_at", { withTimezone: true })
       .notNull()
       .defaultNow(),

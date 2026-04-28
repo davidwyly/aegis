@@ -58,12 +58,32 @@ export async function POST(
     }
 
     const arrayBuf = await (file as File).arrayBuffer()
+
+    // Encrypted-evidence variant: client puts AES-GCM nonce + sealed
+    // recipients in the form fields; the file body is the ciphertext.
+    const bodyNonce = form.get("bodyNonce")
+    const sealedJson = form.get("sealedRecipients")
+    const fileNameField = form.get("fileName")
+    const mimeTypeField = form.get("mimeType")
+
     const item = await uploadEvidence({
       caseUuid: id,
       uploaderAddress: session.address,
-      fileName: (file as File).name,
-      mimeType: (file as File).type,
+      fileName:
+        typeof fileNameField === "string" && fileNameField
+          ? fileNameField
+          : (file as File).name,
+      mimeType:
+        typeof mimeTypeField === "string" && mimeTypeField
+          ? mimeTypeField
+          : (file as File).type,
       content: Buffer.from(arrayBuf),
+      bodyNonce:
+        typeof bodyNonce === "string" && bodyNonce ? bodyNonce : undefined,
+      sealedRecipients:
+        typeof sealedJson === "string" && sealedJson
+          ? JSON.parse(sealedJson)
+          : undefined,
     })
     return NextResponse.json(item, { status: 201 })
   } catch (err) {

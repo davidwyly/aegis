@@ -4,6 +4,8 @@ import {
   sealForRecipients,
   openForViewer,
   pubkeyMatchesSignature,
+  sealBytesForRecipients,
+  openBytesForViewer,
 } from "./seal"
 
 // Two fixed 65-byte (130-hex-char) secp256k1 signatures, hex. Don't need
@@ -95,5 +97,53 @@ describe("seal / open round-trip", () => {
       ],
     }
     expect(() => openForViewer(tampered, alice.privateKey)).toThrow()
+  })
+})
+
+describe("seal / open binary round-trip", () => {
+  it("a recipient can decrypt arbitrary binary bytes", () => {
+    const alice = deriveX25519Keypair(FIXED_SIG_A)
+    // Random-ish 1024-byte body; we only care about exact round-trip.
+    const body = new Uint8Array(1024)
+    for (let i = 0; i < body.length; i++) body[i] = (i * 37 + 13) & 0xff
+    const sealed = sealBytesForRecipients(body, [alice.publicKey])
+    const out = openBytesForViewer(
+      sealed.bodyCiphertext,
+      sealed.bodyNonce,
+      sealed.recipients,
+      alice.privateKey,
+    )
+    expect(out.length).toEqual(body.length)
+    for (let i = 0; i < body.length; i++) expect(out[i]).toEqual(body[i])
+  })
+
+  it("multi-recipient binary round-trip", () => {
+    const alice = deriveX25519Keypair(FIXED_SIG_A)
+    const bob = deriveX25519Keypair(FIXED_SIG_B)
+    const body = new Uint8Array([1, 2, 3, 255, 0, 128])
+    const sealed = sealBytesForRecipients(body, [alice.publicKey, bob.publicKey])
+    for (const v of [alice, bob]) {
+      const out = openBytesForViewer(
+        sealed.bodyCiphertext,
+        sealed.bodyNonce,
+        sealed.recipients,
+        v.privateKey,
+      )
+      expect(Array.from(out)).toEqual([1, 2, 3, 255, 0, 128])
+    }
+  })
+
+  it("a non-recipient cannot decrypt binary", () => {
+    const alice = deriveX25519Keypair(FIXED_SIG_A)
+    const eve = deriveX25519Keypair(FIXED_SIG_B)
+    const sealed = sealBytesForRecipients(new Uint8Array([0x42]), [alice.publicKey])
+    expect(() =>
+      openBytesForViewer(
+        sealed.bodyCiphertext,
+        sealed.bodyNonce,
+        sealed.recipients,
+        eve.privateKey,
+      ),
+    ).toThrow(/No sealed key/)
   })
 })
