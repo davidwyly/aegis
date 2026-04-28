@@ -12,6 +12,9 @@ export function SiteNav() {
         <Link href="/cases" className="hover:underline">
           Cases
         </Link>
+        <Link href="/queue" className="hover:underline">
+          My queue
+        </Link>
         <Link href="/arbiters" className="hover:underline">
           Arbiters
         </Link>
