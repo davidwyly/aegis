@@ -8,11 +8,16 @@ export function CommitRevealForm({
   aegisAddress,
   caseId,
   phase,
+  track = "original",
 }: {
   aegisAddress: `0x${string}`
   caseId: `0x${string}`
   phase: "commit" | "reveal" | "closed"
+  /** Which contract function to call. Defaults to original-panel functions. */
+  track?: "original" | "appeal"
 }) {
+  const COMMIT_FN = track === "appeal" ? "appealCommitVote" : "commitVote"
+  const REVEAL_FN = track === "appeal" ? "appealRevealVote" : "revealVote"
   const { address } = useAccount()
   const chainId = useChainId()
   const { writeContractAsync, isPending } = useWriteContract()
@@ -49,7 +54,7 @@ export function CommitRevealForm({
       const tx = await writeContractAsync({
         address: aegisAddress,
         abi: aegisAbi,
-        functionName: "commitVote",
+        functionName: COMMIT_FN,
         args: [caseId, hash],
         chainId,
       })
@@ -81,7 +86,7 @@ export function CommitRevealForm({
       const tx = await writeContractAsync({
         address: aegisAddress,
         abi: aegisAbi,
-        functionName: "revealVote",
+        functionName: REVEAL_FN,
         args: [caseId, parsed.pct, parsed.salt, rationaleDigest],
         chainId,
       })

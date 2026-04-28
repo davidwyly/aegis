@@ -277,12 +277,28 @@ export async function getCaseById(uuid: string) {
 }
 
 export async function getPanel(caseUuid: string) {
-  // Active panelists only — recused / redrawn rows are kept for audit but
-  // not shown as part of the live panel. See `getPanelHistory` for the
-  // full record.
+  // Active original-panel members only — recused / redrawn rows kept
+  // for audit but not shown as part of the live panel.
   return db.query.panelMembers.findMany({
     where: (p, { and, eq, isNull }) =>
-      and(eq(p.caseUuid, caseUuid), isNull(p.leftAt)),
+      and(
+        eq(p.caseUuid, caseUuid),
+        isNull(p.leftAt),
+        eq(p.phase, "original"),
+      ),
+    orderBy: (p, { asc }) => [asc(p.seat)],
+  })
+}
+
+export async function getAppealPanel(caseUuid: string) {
+  // Appeal-panel members — only present once VRF seats them.
+  return db.query.panelMembers.findMany({
+    where: (p, { and, eq, isNull }) =>
+      and(
+        eq(p.caseUuid, caseUuid),
+        isNull(p.leftAt),
+        eq(p.phase, "appeal"),
+      ),
     orderBy: (p, { asc }) => [asc(p.seat)],
   })
 }

@@ -230,6 +230,13 @@ export const panelMembers = pgTable(
     partyAPercentage: smallint("party_a_percentage"),
     rationaleDigest: text("rationale_digest"),
 
+    // Which phase of the case this panelist is on — 'original' for the
+    // first panel, 'appeal' for the appeal panel. The on-chain logic
+    // excludes the original panel from the appeal draw, so a single
+    // address never appears in both phases of the same case; the
+    // primary key (caseUuid, panelistAddress) still holds.
+    phase: text("phase").notNull().default("original"), // 'original' | 'appeal'
+
     // Tenure on this case. `leftAt` populated when an arbiter recuses
     // (rows marked 'recused') or the panel is redrawn after a stall
     // (rows marked 'redrawn'). Active panelists have `leftAt = null`.
@@ -243,6 +250,7 @@ export const panelMembers = pgTable(
     pk: primaryKey({ columns: [t.caseUuid, t.panelistAddress] }),
     panelistIdx: index("panel_members_panelist_idx").on(t.panelistAddress),
     activeIdx: index("panel_members_active_idx").on(t.caseUuid, t.leftAt),
+    phaseIdx: index("panel_members_phase_idx").on(t.caseUuid, t.phase),
   }),
 )
 

@@ -1244,6 +1244,57 @@ describe("Aegis", () => {
       // Appellant got their bond back.
       expect(await elcpToken.balanceOf(partyA.address)).to.equal(partyABalBefore)
     })
+
+    it("appeal stall settles the original verdict + slashes appeal panel + forfeits bond", async () => {
+      const ctx = await resolveOriginalToVerdict([45, 50, 55])
+      await topUpArbiters(ctx)
+      const { aegis, coordinator, mock, partyA, elcpToken, treasury } = ctx
+      await elcpToken.mint(partyA.address, APPEAL_BOND)
+      await elcpToken.connect(partyA).approve(await aegis.getAddress(), APPEAL_BOND)
+
+      const elcpAddr = await elcpToken.getAddress()
+      const treasuryAccruedBefore = await aegis.treasuryAccrued(elcpAddr)
+
+      const reqTx = await aegis.connect(partyA).requestAppeal(ctx.caseId)
+      const reqReceipt = await reqTx.wait()
+      const reqLog = reqReceipt!.logs
+        .map((l) => {
+          try {
+            return aegis.interface.parseLog(l as any)
+          } catch {
+            return null
+          }
+        })
+        .find((e) => e?.name === "AppealRequested")
+      const requestId = reqLog!.args.vrfRequestId as bigint
+      await fulfillAppealPanel(aegis, coordinator, requestId)
+
+      // Appeal panel never commits / reveals → stall.
+      await time.increase(VOTE_WINDOW + REVEAL_WINDOW + GRACE_WINDOW + 1)
+      const finTx = await aegis.finalize(ctx.caseId)
+      const finReceipt = await finTx.wait()
+
+      const stalled = finReceipt!.logs
+        .map((l) => {
+          try {
+            return aegis.interface.parseLog(l as any)
+          } catch {
+            return null
+          }
+        })
+        .find((e) => e?.name === "AppealStalled")
+      expect(stalled).to.exist
+
+      // Bond forfeited to treasury (≥ APPEAL_BOND of ELCP). Plus
+      // slashed amounts from the appeal-panel non-revealers.
+      const treasuryAccruedAfter = await aegis.treasuryAccrued(elcpAddr)
+      expect(treasuryAccruedAfter - treasuryAccruedBefore).to.be.greaterThanOrEqual(APPEAL_BOND)
+
+      // Underlying mock case settled at the ORIGINAL median (50).
+      const settled = await mock.cases(CASE_KEY)
+      expect(settled.partyAPercentage).to.equal(50)
+      void treasury
+    })
   })
 
   describe("claim", () => {

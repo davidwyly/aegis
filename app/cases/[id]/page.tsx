@@ -3,6 +3,7 @@ import { notFound } from "next/navigation"
 import {
   getCaseById,
   getPanel,
+  getAppealPanel,
   listBriefsForViewer,
 } from "@/lib/cases/service"
 import { findConflictsForPanel } from "@/lib/arbiters/conflicts"
@@ -32,6 +33,7 @@ export default async function CaseDetailPage({
   if (!c) notFound()
 
   const panel = await getPanel(c.id)
+  const appealPanel = await getAppealPanel(c.id)
   const conflictsByPanelist = await findConflictsForPanel(
     c.chainId,
     panel.map((p) => p.panelistAddress),
@@ -42,6 +44,17 @@ export default async function CaseDetailPage({
   const isPanelist = viewer
     ? panel.some((p) => p.panelistAddress.toLowerCase() === viewer.toLowerCase())
     : false
+  const isAppealPanelist = viewer
+    ? appealPanel.some(
+        (p) => p.panelistAddress.toLowerCase() === viewer.toLowerCase(),
+      )
+    : false
+  const appealPhase: "commit" | "reveal" | "closed" =
+    c.status === "appeal_open"
+      ? "commit"
+      : c.status === "appeal_revealing"
+        ? "reveal"
+        : "closed"
   const isParty =
     viewer !== null &&
     (viewer.toLowerCase() === c.partyA.toLowerCase() ||
@@ -308,6 +321,57 @@ export default async function CaseDetailPage({
               aegisAddress={c.aegisAddress as `0x${string}`}
               caseId={c.caseId as `0x${string}`}
               phase={phase}
+            />
+          </div>
+        </section>
+      )}
+
+      {appealPanel.length > 0 && (
+        <section className="card">
+          <h2 className="text-sm font-medium uppercase tracking-wide text-zinc-500">
+            Appeal panel
+          </h2>
+          <p className="mt-1 text-xs text-zinc-500">
+            Larger second-instance panel (size {appealPanel.length}). Drawn
+            via VRF excluding the original panel.
+          </p>
+          <ul className="mt-2 space-y-1 text-sm">
+            {appealPanel.map((p) => (
+              <li key={p.panelistAddress} className="flex flex-wrap items-center gap-3">
+                <span className="text-xs text-zinc-500">seat {p.seat}</span>
+                <Link
+                  href={`/arbiters/${p.panelistAddress}`}
+                  className="font-mono hover:underline"
+                >
+                  {p.panelistAddress}
+                </Link>
+                {p.committedAt && (
+                  <span className="badge bg-zinc-200 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">
+                    committed
+                  </span>
+                )}
+                {p.revealedAt && (
+                  <span className="badge bg-emerald-100 text-emerald-900 dark:bg-emerald-900/40 dark:text-emerald-200">
+                    revealed{p.partyAPercentage !== null && ` · ${p.partyAPercentage}/100`}
+                  </span>
+                )}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      {isAppealPanelist && (
+        <section className="card border-amber-300 dark:border-amber-700">
+          <h2 className="text-sm font-medium uppercase tracking-wide text-zinc-500">
+            Your appeal vote ({appealPhase} phase)
+          </h2>
+          <div className="mt-3">
+            <CommitRevealForm
+              aegisAddress={c.aegisAddress as `0x${string}`}
+              caseId={c.caseId as `0x${string}`}
+              phase={appealPhase}
+              track="appeal"
             />
           </div>
         </section>
