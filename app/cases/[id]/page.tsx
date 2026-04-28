@@ -14,6 +14,8 @@ import { CommitRevealForm } from "@/components/commit-reveal-form"
 import { EvidencePanel } from "@/components/evidence-panel"
 import { CaseTimeline } from "@/components/case-timeline"
 import { assembleTimeline } from "@/lib/cases/timeline"
+import { AppealButton } from "@/components/appeal-button"
+import { getChainData } from "@/lib/chains"
 import { getExplorerAddressUrl } from "@/lib/chains"
 
 // Always server-render — the case state, panel, and brief visibility
@@ -310,6 +312,43 @@ export default async function CaseDetailPage({
           </div>
         </section>
       )}
+
+      {isParty && c.status === "appealable_resolved" && (() => {
+        const chain = getChainData(c.chainId)
+        const elcp = chain.elcp
+        if (!elcp) {
+          return (
+            <section className="card">
+              <h2 className="text-sm font-medium uppercase tracking-wide text-zinc-500">
+                Appeal verdict
+              </h2>
+              <p className="mt-1 text-sm text-zinc-500">
+                ELCP token address not configured for chain {c.chainId}.
+              </p>
+            </section>
+          )
+        }
+        return (
+          <section className="card border-amber-300 dark:border-amber-700">
+            <h2 className="text-sm font-medium uppercase tracking-wide text-zinc-500">
+              Appeal verdict
+            </h2>
+            <p className="mt-1 text-xs text-zinc-500">
+              Original median: party A {c.medianPercentage ?? "?"} / 100. Verdict
+              applies automatically once the appeal window closes if no party
+              appeals.
+            </p>
+            <div className="mt-3">
+              <AppealButton
+                aegisAddress={c.aegisAddress as `0x${string}`}
+                caseId={c.caseId as `0x${string}`}
+                bondToken={elcp}
+                bondAmount={BigInt("100000000000000000000") * 2n /* placeholder; see policy */}
+              />
+            </div>
+          </section>
+        )
+      })()}
 
       <section className="card">
         <h2 className="text-sm font-medium uppercase tracking-wide text-zinc-500">

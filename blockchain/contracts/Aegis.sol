@@ -109,6 +109,12 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
         uint256 stakeRequirement; // minimum stake to be eligible for panels
         uint16 panelFeeBps; // share of fee paid to revealing panelists
         address treasury; // recipient for non-panel share
+        // Appeals — see `requestAppeal` + `_finalizeAppeal`. All four
+        // settings are governance-tunable; sane defaults at deploy.
+        uint64 appealWindow; // seconds after AppealableResolved during which an appeal can be filed
+        uint8 appealPanelSize; // odd; typically larger than panelSize (e.g. 5 vs 3)
+        uint256 appealBondAmount; // ELCP bond the appellant posts on requestAppeal
+        uint16 appealOverturnTolerance; // verdict diff (in percentage points) above which original is overturned
     }
 
     Policy public policy;
@@ -144,6 +150,10 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
         AwaitingPanel, // VRF requested; waiting for fulfillRandomWords callback
         Open, // commit phase
         Revealing, // reveal phase
+        AppealableResolved, // original verdict computed; appeal window open
+        AppealAwaitingPanel, // appeal requested; waiting on VRF for the larger panel
+        AppealOpen, // appeal commit phase
+        AppealRevealing, // appeal reveal phase
         Resolved,
         DefaultResolved // 50/50 fallback applied after second stall
     }
@@ -170,6 +180,16 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
         uint8 commitCount;
         uint8 revealCount;
         CaseStatus status;
+        // Verdict from the original panel — staged here while the case is
+        // in AppealableResolved / appeal-* states, so a no-appeal expiry
+        // can apply it and an appeal can compare against it. Zero / empty
+        // before the panel resolves.
+        uint16 originalPercentage;
+        bytes32 originalDigest;
+        // Set when status flips to AppealableResolved. Lets the appeal
+        // window run from "panel resolved" rather than the (possibly
+        // already-passed) reveal deadline.
+        uint64 appealDeadline;
     }
 
     mapping(bytes32 => Case) private _cases;
@@ -189,6 +209,35 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
     mapping(address => uint256) public treasuryAccrued;
 
     uint256 private _caseNonce;
+
+    // ============================================================
+    // Appeals — second-instance review. Original-panel verdict is
+    // staged in AppealableResolved; either party can appeal within
+    // `policy.appealWindow` by posting `appealBondAmount` ELCP. A
+    // larger panel re-arbitrates; if their median differs from the
+    // original by more than `appealOverturnTolerance` percentage
+    // points, the original panel is slashed and the appeal verdict
+    // applies. Otherwise the original verdict stands and the bond
+    // pays the appeal panel.
+    // ============================================================
+
+    struct Appeal {
+        bool exists;
+        address appellant;
+        uint256 bondAmount;
+        uint64 appealDeadline; // when no-appeal auto-settles the original verdict
+        uint64 deadlineCommit;
+        uint64 deadlineReveal;
+        uint8 panelSize;
+        uint8 commitCount;
+        uint8 revealCount;
+        uint16 originalPercentage;
+        bytes32 originalDigest;
+    }
+
+    mapping(bytes32 => Appeal) public appeals;
+    mapping(bytes32 => address[]) private _appealPanels;
+    mapping(bytes32 => mapping(address => Commit)) private _appealCommits;
 
     // ============================================================
     // Events
@@ -261,6 +310,39 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
     event FeesClaimed(address indexed arbiter, address indexed token, uint256 amount);
     event TreasuryWithdrawn(address indexed token, address indexed to, uint256 amount);
 
+    event CaseAppealable(
+        bytes32 indexed caseId,
+        uint16 originalPercentage,
+        bytes32 originalDigest,
+        uint64 appealDeadline
+    );
+    event AppealRequested(
+        bytes32 indexed caseId,
+        address indexed appellant,
+        uint256 bondAmount,
+        uint256 vrfRequestId
+    );
+    event AppealPanelSeated(bytes32 indexed caseId, address[] panel);
+    event AppealCommitted(bytes32 indexed caseId, address indexed panelist, bytes32 commitHash);
+    event AppealRevealed(
+        bytes32 indexed caseId,
+        address indexed panelist,
+        uint16 partyAPercentage,
+        bytes32 rationaleDigest
+    );
+    event AppealUpheld(
+        bytes32 indexed caseId,
+        uint16 originalPercentage,
+        uint16 appealPercentage
+    );
+    event AppealOverturned(
+        bytes32 indexed caseId,
+        uint16 originalPercentage,
+        uint16 appealPercentage,
+        uint256 originalPanelSlashed
+    );
+    event AppealStalled(bytes32 indexed caseId, uint256 slashedTotal);
+
     // ============================================================
     // Errors
     // ============================================================
@@ -293,6 +375,14 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
     error InsufficientTreasury();
     error NothingToClaim();
     error AmountTooLarge();
+    error CaseNotAppealable();
+    error AppealWindowClosed();
+    error AppealWindowOpen();
+    error AppealAlreadyExists();
+    error AppealantNotParty();
+    error AppealCommitClosed();
+    error AppealRevealClosed();
+    error NotAppealPanelist();
     error StakeLocked();
     error CannotRecuseAfterCommit();
     error CaseAlreadyLive();
@@ -336,6 +426,15 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
         if (p.voteWindow == 0 || p.revealWindow == 0) revert InvalidPolicy();
         if (p.panelFeeBps > BPS_DENOMINATOR) revert InvalidPolicy();
         if (p.treasury == address(0)) revert InvalidPolicy();
+        // Appeals: appealPanelSize must be odd and at least equal to panelSize
+        // (typically larger). Tolerance 0..=100. Window > 0.
+        if (
+            p.appealPanelSize < p.panelSize ||
+            p.appealPanelSize > 11 ||
+            p.appealPanelSize % 2 == 0
+        ) revert InvalidPolicy();
+        if (p.appealWindow == 0) revert InvalidPolicy();
+        if (p.appealOverturnTolerance > 100) revert InvalidPolicy();
     }
 
     // ============================================================
@@ -539,43 +638,75 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
         delete requestToCase[requestId];
 
         Case storage c = _cases[caseId];
-        if (c.status != CaseStatus.AwaitingPanel) revert CaseNotAwaitingPanel();
-
         Policy memory p = policy;
-        address[] memory exclude = _panels[caseId]; // empty on first request, old panel on redraw
 
-        address[] memory panel = _drawPanelWithSeed(
-            randomWords[0],
-            c.partyA,
-            c.partyB,
-            p.panelSize,
-            p.stakeRequirement,
-            exclude
-        );
-        _panels[caseId] = panel;
-        for (uint256 i = 0; i < panel.length; ++i) {
-            arbiters[panel[i]].caseCount += 1;
-            lockedStake[panel[i]] += uint96(p.stakeRequirement);
-        }
+        if (c.status == CaseStatus.AwaitingPanel) {
+            // Original panel — first request OR round-1 redraw.
+            address[] memory exclude = _panels[caseId]; // empty on first, old panel on redraw
 
-        c.deadlineCommit = uint64(block.timestamp + p.voteWindow);
-        c.deadlineReveal = uint64(block.timestamp + p.voteWindow + p.revealWindow);
-        c.status = CaseStatus.Open;
-
-        if (c.round == 0) {
-            emit CaseOpened(
-                caseId,
-                c.escrow,
-                c.escrowCaseId,
+            address[] memory panel = _drawPanelWithSeed(
+                randomWords[0],
                 c.partyA,
                 c.partyB,
-                c.feeToken,
-                c.amount,
-                panel
+                p.panelSize,
+                p.stakeRequirement,
+                exclude
             );
-        } else {
-            emit PanelRedrawn(caseId, panel);
+            _panels[caseId] = panel;
+            for (uint256 i = 0; i < panel.length; ++i) {
+                arbiters[panel[i]].caseCount += 1;
+                lockedStake[panel[i]] += uint96(p.stakeRequirement);
+            }
+
+            c.deadlineCommit = uint64(block.timestamp + p.voteWindow);
+            c.deadlineReveal = uint64(block.timestamp + p.voteWindow + p.revealWindow);
+            c.status = CaseStatus.Open;
+
+            if (c.round == 0) {
+                emit CaseOpened(
+                    caseId,
+                    c.escrow,
+                    c.escrowCaseId,
+                    c.partyA,
+                    c.partyB,
+                    c.feeToken,
+                    c.amount,
+                    panel
+                );
+            } else {
+                emit PanelRedrawn(caseId, panel);
+            }
+            return;
         }
+
+        if (c.status == CaseStatus.AppealAwaitingPanel) {
+            // Appeal panel — exclude the original panel.
+            Appeal storage a = appeals[caseId];
+            address[] memory exclude = _panels[caseId];
+
+            address[] memory panel = _drawPanelWithSeed(
+                randomWords[0],
+                c.partyA,
+                c.partyB,
+                a.panelSize,
+                p.stakeRequirement,
+                exclude
+            );
+            _appealPanels[caseId] = panel;
+            for (uint256 i = 0; i < panel.length; ++i) {
+                arbiters[panel[i]].caseCount += 1;
+                lockedStake[panel[i]] += uint96(p.stakeRequirement);
+            }
+
+            a.deadlineCommit = uint64(block.timestamp + p.voteWindow);
+            a.deadlineReveal = uint64(block.timestamp + p.voteWindow + p.revealWindow);
+            c.status = CaseStatus.AppealOpen;
+
+            emit AppealPanelSeated(caseId, panel);
+            return;
+        }
+
+        revert CaseNotAwaitingPanel();
     }
 
     // ============================================================
@@ -724,9 +855,48 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
             revert CaseAlreadyFinalized();
         }
 
+        // Branch on phase. Original-panel commit/reveal lives at the top;
+        // AppealableResolved waits out the appeal window; appeal phases
+        // route to _finalizeAppeal.
+        if (
+            c.status == CaseStatus.Open || c.status == CaseStatus.Revealing
+        ) {
+            _finalizeOriginalPhase(c, caseId);
+            return;
+        }
+        if (c.status == CaseStatus.AppealableResolved) {
+            // Original verdict was staged. After the appeal window closes
+            // with no appeal, anyone can finalize → applies original.
+            if (block.timestamp < _appealDeadline(c, caseId)) revert AppealWindowOpen();
+            _settleOriginal(c, caseId);
+            return;
+        }
+        if (
+            c.status == CaseStatus.AppealOpen ||
+            c.status == CaseStatus.AppealRevealing
+        ) {
+            _finalizeAppeal(c, caseId);
+            return;
+        }
+        // AwaitingPanel / AppealAwaitingPanel — VRF hasn't fulfilled yet;
+        // finalize is meaningless. Rely on the fulfillment to advance.
+        revert CaseNotOpen();
+    }
+
+    function _appealDeadline(Case storage c, bytes32 caseId) internal view returns (uint64) {
+        Appeal storage a = appeals[caseId];
+        // Once an appeal is requested, its deadline lives on the Appeal
+        // struct (used for "stop accepting new appeals"). Otherwise
+        // use the deadline stamped on the case at the moment status
+        // flipped to AppealableResolved.
+        if (a.exists) return a.appealDeadline;
+        return c.appealDeadline;
+    }
+
+    function _finalizeOriginalPhase(Case storage c, bytes32 caseId) internal {
         uint8 quorum = (c.panelSize / 2) + 1;
 
-        // All-revealed: fast path, resolves immediately.
+        // All-revealed: fast path, stages immediately.
         if (c.revealCount == c.panelSize) {
             _resolveByMedian(c, caseId, quorum);
             return;
@@ -751,6 +921,283 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
         }
     }
 
+    // ============================================================
+    // Appeals
+    // ============================================================
+
+    /// @notice File an appeal against the original-panel verdict.
+    /// Either party may call within the appeal window; bond is taken
+    /// in the stake token (ELCP). Triggers VRF for a larger panel.
+    function requestAppeal(bytes32 caseId) external nonReentrant {
+        Case storage c = _cases[caseId];
+        if (c.status != CaseStatus.AppealableResolved) revert CaseNotAppealable();
+        if (msg.sender != c.partyA && msg.sender != c.partyB) revert AppealantNotParty();
+
+        // No-appeal expiry: once the appeal-window deadline stamped on the
+        // case at AppealableResolved time has passed, parties can no longer
+        // appeal. (After that finalize() settles the original verdict.)
+        Policy memory p = policy;
+        if (block.timestamp >= c.appealDeadline) {
+            revert AppealWindowClosed();
+        }
+
+        if (appeals[caseId].exists) revert AppealAlreadyExists();
+
+        // Pre-check eligibility: appeal panel needs `appealPanelSize`
+        // arbiters excluding the original panel. Fail fast before
+        // taking the bond + paying for VRF.
+        address[] memory excludeOriginal = _panels[caseId];
+        if (
+            _eligibleArbiterCount(
+                c.partyA,
+                c.partyB,
+                p.stakeRequirement,
+                excludeOriginal
+            ) < p.appealPanelSize
+        ) revert NotEnoughArbiters();
+
+        // Take the bond in ELCP.
+        stakeToken.safeTransferFrom(msg.sender, address(this), p.appealBondAmount);
+
+        // Stash appeal state. Deadlines fill in at fulfillment.
+        Appeal storage a = appeals[caseId];
+        a.exists = true;
+        a.appellant = msg.sender;
+        a.bondAmount = p.appealBondAmount;
+        a.appealDeadline = c.appealDeadline;
+        a.panelSize = p.appealPanelSize;
+        a.originalPercentage = c.originalPercentage;
+        a.originalDigest = c.originalDigest;
+
+        c.status = CaseStatus.AppealAwaitingPanel;
+
+        // Request VRF for the appeal panel.
+        VrfConfig memory cfg = vrfConfig;
+        uint256 requestId = IVRFCoordinator(vrfCoordinator).requestRandomWords(
+            cfg.keyHash,
+            cfg.subscriptionId,
+            cfg.requestConfirmations,
+            cfg.callbackGasLimit,
+            1
+        );
+        requestToCase[requestId] = caseId;
+
+        emit AppealRequested(caseId, msg.sender, p.appealBondAmount, requestId);
+    }
+
+    function appealCommitVote(bytes32 caseId, bytes32 commitHash) external {
+        Case storage c = _cases[caseId];
+        if (c.status != CaseStatus.AppealOpen) revert CaseNotOpen();
+        Appeal storage a = appeals[caseId];
+        if (block.timestamp >= a.deadlineCommit) revert AppealCommitClosed();
+        if (!_isAppealPanelist(caseId, msg.sender)) revert NotAppealPanelist();
+
+        Commit storage cm = _appealCommits[caseId][msg.sender];
+        if (cm.hash != bytes32(0)) revert AlreadyCommitted();
+        cm.hash = commitHash;
+        a.commitCount += 1;
+
+        emit AppealCommitted(caseId, msg.sender, commitHash);
+    }
+
+    function appealRevealVote(
+        bytes32 caseId,
+        uint16 partyAPercentage,
+        bytes32 salt,
+        bytes32 rationaleDigest
+    ) external {
+        Case storage c = _cases[caseId];
+        if (c.status != CaseStatus.AppealOpen && c.status != CaseStatus.AppealRevealing) {
+            revert CaseNotRevealing();
+        }
+        Appeal storage a = appeals[caseId];
+        if (block.timestamp < a.deadlineCommit) revert CommitWindowOpen();
+        if (block.timestamp >= a.deadlineReveal) revert AppealRevealClosed();
+        if (partyAPercentage > 100) revert InvalidPercentage();
+        if (!_isAppealPanelist(caseId, msg.sender)) revert NotAppealPanelist();
+
+        if (c.status == CaseStatus.AppealOpen) c.status = CaseStatus.AppealRevealing;
+
+        Commit storage cm = _appealCommits[caseId][msg.sender];
+        if (cm.hash == bytes32(0)) revert NoCommit();
+        if (cm.revealed) revert AlreadyRevealed();
+
+        bytes32 expected = keccak256(
+            abi.encode(msg.sender, caseId, partyAPercentage, salt, rationaleDigest)
+        );
+        if (expected != cm.hash) revert CommitMismatch();
+
+        cm.revealed = true;
+        cm.partyAPercentage = partyAPercentage;
+        cm.rationaleDigest = rationaleDigest;
+        a.revealCount += 1;
+
+        emit AppealRevealed(caseId, msg.sender, partyAPercentage, rationaleDigest);
+    }
+
+    function _isAppealPanelist(bytes32 caseId, address candidate) internal view returns (bool) {
+        address[] storage panel = _appealPanels[caseId];
+        for (uint256 i = 0; i < panel.length; ++i) {
+            if (panel[i] == candidate) return true;
+        }
+        return false;
+    }
+
+    /// @notice Finalize an appeal once the appeal panel has voted.
+    /// Compares the appeal median to the original verdict using
+    /// `appealOverturnTolerance` (in percentage points). Within
+    /// tolerance ⇒ original upheld, bond goes to the appeal panel +
+    /// treasury. Over tolerance ⇒ overturned, bond refunded, original
+    /// panel slashed, appeal verdict applied.
+    function _finalizeAppeal(Case storage c, bytes32 caseId) internal {
+        Appeal storage a = appeals[caseId];
+        Policy memory p = policy;
+        uint8 quorum = (a.panelSize / 2) + 1;
+
+        // All-revealed → resolve. Otherwise wait for window.
+        if (a.revealCount < a.panelSize) {
+            if (block.timestamp < a.deadlineReveal) revert RevealWindowOpen();
+        }
+
+        // Below quorum → appeal stalls. Slash appeal panel + forfeit bond
+        // to treasury, settle the ORIGINAL verdict (don't recurse appeals).
+        if (a.revealCount < quorum) {
+            uint64 stallDeadline = a.deadlineReveal + p.graceWindow;
+            if (block.timestamp < stallDeadline) revert GraceWindowOpen();
+            uint256 slashed = _slashAppealNonRevealers(caseId);
+            // Bond goes to treasury (appellant gambled and lost the panel).
+            treasuryAccrued[address(stakeToken)] += a.bondAmount;
+            // Release locks (appeal + original) before settling.
+            _releaseAppealPanelLocks(caseId, p.stakeRequirement);
+            _releasePanelLocks(caseId, p.stakeRequirement);
+            emit AppealStalled(caseId, slashed);
+            // Promote case to settle-original.
+            c.status = CaseStatus.AppealableResolved; // briefly, so _settleOriginal doesn't trip status guard
+            _settleOriginal(c, caseId);
+            return;
+        }
+
+        (uint16 appealMedian, ) = _computeVerdict(
+            caseId,
+            _appealPanels[caseId],
+            _appealCommits,
+            a.revealCount
+        );
+
+        // Compare to original. Tolerance is in percentage points (0..100).
+        uint16 diff = appealMedian > a.originalPercentage
+            ? appealMedian - a.originalPercentage
+            : a.originalPercentage - appealMedian;
+        bool upheld = diff <= p.appealOverturnTolerance;
+
+        // Appeal panel revealers (for fee distribution).
+        address[] memory appealPanel = _appealPanels[caseId];
+        address[] memory appealRevealers = new address[](a.revealCount);
+        {
+            uint256 idx;
+            for (uint256 i = 0; i < appealPanel.length; ++i) {
+                if (_appealCommits[caseId][appealPanel[i]].revealed) {
+                    appealRevealers[idx++] = appealPanel[i];
+                }
+            }
+        }
+
+        // Release appeal panel locks regardless of outcome.
+        _releaseAppealPanelLocks(caseId, p.stakeRequirement);
+
+        if (upheld) {
+            // Bond → 80% appeal revealers (equal share), 20% treasury.
+            _distributeFees(caseId, address(stakeToken), a.bondAmount, appealRevealers);
+            emit AppealUpheld(caseId, a.originalPercentage, appealMedian);
+            // Apply ORIGINAL verdict; original panel paid from escrow fee.
+            c.status = CaseStatus.AppealableResolved; // bridge state for _settleOriginal
+            _settleOriginal(c, caseId);
+            return;
+        }
+
+        // Overturned. Slash original panel — each loses one stakeRequirement
+        // bond. The slashed total + the appellant's bond → appeal panel
+        // (revealers) and treasury, 80/20.
+        uint256 slashedFromOriginal = _slashOriginalPanelOnOverturn(caseId, p.stakeRequirement);
+        // Refund bond to appellant.
+        stakeToken.safeTransfer(a.appellant, a.bondAmount);
+        // Distribute the slashed amount to the appeal panel.
+        _distributeFees(caseId, address(stakeToken), slashedFromOriginal, appealRevealers);
+
+        emit AppealOverturned(
+            caseId,
+            a.originalPercentage,
+            appealMedian,
+            slashedFromOriginal
+        );
+
+        // Apply APPEAL verdict to escrow.
+        c.status = CaseStatus.Resolved;
+        uint256 balBefore = IERC20(c.feeToken).balanceOf(address(this));
+        // Use the appeal verdict + a fresh digest committing both panels' work.
+        bytes32 finalDigest = keccak256(
+            abi.encode(caseId, "APPEAL_OVERTURNED", a.originalDigest, appealMedian)
+        );
+        IArbitrableEscrow(c.escrow).applyArbitration(c.escrowCaseId, appealMedian, finalDigest);
+        uint256 balAfter = IERC20(c.feeToken).balanceOf(address(this));
+        uint256 received = balAfter > balBefore ? balAfter - balBefore : 0;
+
+        // Escrow fee on overturn → also to the appeal panel (they did the
+        // dispositive work) + treasury.
+        _distributeFees(caseId, c.feeToken, received, appealRevealers);
+
+        // Release the original panel's lock (their bond was slashed; remaining
+        // free stake is theirs to keep).
+        _releasePanelLocks(caseId, p.stakeRequirement);
+        delete liveCaseFor[c.escrow][c.escrowCaseId];
+
+        emit CaseResolved(caseId, appealMedian, finalDigest);
+    }
+
+    function _releaseAppealPanelLocks(bytes32 caseId, uint256 stakeRequirement) internal {
+        address[] memory panel = _appealPanels[caseId];
+        for (uint256 i = 0; i < panel.length; ++i) {
+            uint96 cur = lockedStake[panel[i]];
+            uint96 release = uint96(stakeRequirement);
+            lockedStake[panel[i]] = cur > release ? cur - release : 0;
+        }
+    }
+
+    function _slashAppealNonRevealers(bytes32 caseId) internal returns (uint256 slashedTotal) {
+        address[] memory panel = _appealPanels[caseId];
+        uint96 bond = uint96(policy.stakeRequirement);
+        for (uint256 i = 0; i < panel.length; ++i) {
+            address panelist = panel[i];
+            if (_appealCommits[caseId][panelist].revealed) continue;
+            Arbiter storage a = arbiters[panelist];
+            if (a.stakedAmount == 0) continue;
+            uint96 cut = bond > a.stakedAmount ? a.stakedAmount : bond;
+            if (cut == 0) continue;
+            a.stakedAmount -= cut;
+            treasuryAccrued[address(stakeToken)] += cut;
+            slashedTotal += cut;
+            emit Slashed(panelist, cut, caseId);
+        }
+    }
+
+    function _slashOriginalPanelOnOverturn(
+        bytes32 caseId,
+        uint256 stakeRequirement
+    ) internal returns (uint256 slashedTotal) {
+        address[] memory panel = _panels[caseId];
+        uint96 bond = uint96(stakeRequirement);
+        for (uint256 i = 0; i < panel.length; ++i) {
+            address panelist = panel[i];
+            Arbiter storage a = arbiters[panelist];
+            if (a.stakedAmount == 0) continue;
+            uint96 cut = bond > a.stakedAmount ? a.stakedAmount : bond;
+            if (cut == 0) continue;
+            a.stakedAmount -= cut;
+            slashedTotal += cut;
+            emit Slashed(panelist, cut, caseId);
+        }
+    }
+
     function _releasePanelLocks(bytes32 caseId, uint256 stakeRequirement) internal {
         address[] memory panel = _panels[caseId];
         for (uint256 i = 0; i < panel.length; ++i) {
@@ -760,43 +1207,85 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
         }
     }
 
+    /// @notice Compute the original-panel verdict and STAGE it. Doesn't
+    /// settle the underlying escrow yet — that waits until either the
+    /// appeal window closes with no appeal, or an appeal completes with
+    /// the original verdict upheld.
     function _resolveByMedian(Case storage c, bytes32 caseId, uint8 quorum) internal {
+        (uint16 median, bytes32 finalDigest) = _computeVerdict(caseId, _panels[caseId], _commits, c.revealCount)
+        ;
+
+        c.originalPercentage = median;
+        c.originalDigest = finalDigest;
+        c.status = CaseStatus.AppealableResolved;
+        c.appealDeadline = uint64(block.timestamp + policy.appealWindow);
+
+        emit CaseAppealable(caseId, median, finalDigest, c.appealDeadline);
+
+        // Quorum unused in body but kept in the signature so the
+        // function reads as "I confirmed enough reveals to resolve."
+        quorum;
+    }
+
+    /// @notice Apply the original verdict to the escrow and distribute
+    /// fees to the original-panel revealers. Called when the appeal
+    /// window closes with no appeal, or when an appeal completes with
+    /// the original verdict upheld.
+    function _settleOriginal(Case storage c, bytes32 caseId) internal {
         address[] memory panel = _panels[caseId];
-        uint16[] memory votes = new uint16[](c.revealCount);
-        bytes32[] memory digests = new bytes32[](c.revealCount);
-        address[] memory revealers = new address[](c.revealCount);
+        // Recollect revealers — same predicate as _computeVerdict.
+        uint256 revealedCount;
+        for (uint256 i = 0; i < panel.length; ++i) {
+            if (_commits[caseId][panel[i]].revealed) ++revealedCount;
+        }
+        address[] memory revealers = new address[](revealedCount);
         uint256 idx;
         for (uint256 i = 0; i < panel.length; ++i) {
-            Commit storage cm = _commits[caseId][panel[i]];
-            if (cm.revealed) {
-                votes[idx] = cm.partyAPercentage;
-                digests[idx] = cm.rationaleDigest;
-                revealers[idx] = panel[i];
-                ++idx;
+            if (_commits[caseId][panel[i]].revealed) {
+                revealers[idx++] = panel[i];
             }
         }
 
-        uint16 median = _median(votes);
-        bytes32 finalDigest = keccak256(abi.encode(caseId, votes, digests));
-
         c.status = CaseStatus.Resolved;
 
-        // Settle on the underlying escrow. Measure fee delta to know how much
-        // the escrow paid us.
         uint256 balBefore = IERC20(c.feeToken).balanceOf(address(this));
-        IArbitrableEscrow(c.escrow).applyArbitration(c.escrowCaseId, median, finalDigest);
+        IArbitrableEscrow(c.escrow).applyArbitration(
+            c.escrowCaseId,
+            c.originalPercentage,
+            c.originalDigest
+        );
         uint256 balAfter = IERC20(c.feeToken).balanceOf(address(this));
         uint256 received = balAfter > balBefore ? balAfter - balBefore : 0;
 
         _distributeFees(caseId, c.feeToken, received, revealers);
-
-        // Quorum is unused here today, but kept in the signature so the
-        // function reads as "I confirmed enough reveals to resolve."
-        quorum;
-
         _releasePanelLocks(caseId, policy.stakeRequirement);
         delete liveCaseFor[c.escrow][c.escrowCaseId];
-        emit CaseResolved(caseId, median, finalDigest);
+
+        emit CaseResolved(caseId, c.originalPercentage, c.originalDigest);
+    }
+
+    /// @dev Pure-ish reduction of a panel's reveals to a `(median, digest)`
+    /// pair. Pulled out so the appeal path can reuse it on the appeal
+    /// panel + appeal commits without duplicating the loop.
+    function _computeVerdict(
+        bytes32 caseId,
+        address[] memory panel,
+        mapping(bytes32 => mapping(address => Commit)) storage commits,
+        uint8 revealCount
+    ) internal view returns (uint16 median, bytes32 digest) {
+        uint16[] memory votes = new uint16[](revealCount);
+        bytes32[] memory digests = new bytes32[](revealCount);
+        uint256 idx;
+        for (uint256 i = 0; i < panel.length; ++i) {
+            Commit storage cm = commits[caseId][panel[i]];
+            if (cm.revealed) {
+                votes[idx] = cm.partyAPercentage;
+                digests[idx] = cm.rationaleDigest;
+                ++idx;
+            }
+        }
+        median = _median(votes);
+        digest = keccak256(abi.encode(caseId, votes, digests));
     }
 
     function _stallAndRedraw(Case storage c, bytes32 caseId) internal {

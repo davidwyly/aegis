@@ -5,6 +5,10 @@ const VALID_STATUSES = new Set([
   "awaiting_panel",
   "open",
   "revealing",
+  "appealable_resolved",
+  "appeal_awaiting_panel",
+  "appeal_open",
+  "appeal_revealing",
   "resolved",
   "default_resolved",
   "stalled",
@@ -14,6 +18,10 @@ type Status =
   | "awaiting_panel"
   | "open"
   | "revealing"
+  | "appealable_resolved"
+  | "appeal_awaiting_panel"
+  | "appeal_open"
+  | "appeal_revealing"
   | "resolved"
   | "default_resolved"
   | "stalled"

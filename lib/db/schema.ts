@@ -145,6 +145,12 @@ export const caseStatusEnum = pgEnum("case_status", [
   "awaiting_panel", // CaseRequested seen; VRF callback still pending
   "open",
   "revealing",
+  // Appeals lifecycle
+  "appealable_resolved", // original-panel verdict staged; appeal window open
+  "appeal_awaiting_panel", // VRF requested for the appeal panel
+  "appeal_open", // appeal commit phase
+  "appeal_revealing", // appeal reveal phase
+  // Terminal
   "resolved",
   "default_resolved",
   "stalled",

@@ -15,6 +15,10 @@ type Action =
       stakeRequirement: string
       panelFeeBps: number
       treasury: string
+      appealWindow: number
+      appealPanelSize: number
+      appealBondAmount: string
+      appealOverturnTolerance: number
     }
   | { kind: "setNewCasesPaused"; paused: boolean }
 
@@ -47,6 +51,10 @@ function buildCalldata(action: Action): `0x${string}` {
             stakeRequirement: BigInt(action.stakeRequirement),
             panelFeeBps: action.panelFeeBps,
             treasury: action.treasury as `0x${string}`,
+            appealWindow: BigInt(action.appealWindow),
+            appealPanelSize: action.appealPanelSize,
+            appealBondAmount: BigInt(action.appealBondAmount),
+            appealOverturnTolerance: action.appealOverturnTolerance,
           },
         ],
       })
@@ -149,6 +157,10 @@ function defaultsFor(kind: Action["kind"]): Action {
         stakeRequirement: "100000000000000000000",
         panelFeeBps: 8000,
         treasury: "",
+        appealWindow: 7 * 86_400, // 7 days
+        appealPanelSize: 5,
+        appealBondAmount: "200000000000000000000", // 200 ELCP
+        appealOverturnTolerance: 5, // ±5pp
       }
     case "setNewCasesPaused":
       return { kind: "setNewCasesPaused", paused: false }

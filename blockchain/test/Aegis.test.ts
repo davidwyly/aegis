@@ -24,12 +24,22 @@ const GRACE_WINDOW = 60 * 60 * 12 // 12 h
 const STAKE_REQ = elcp("100")
 const PANEL_FEE_BPS = 8000 // 80% to panel, 20% to treasury
 
+// Appeals policy defaults
+const APPEAL_WINDOW = 60 * 60 * 24 * 7 // 7 days
+const APPEAL_PANEL_SIZE = 5
+const APPEAL_BOND = elcp("200") // 2 × stake requirement
+const APPEAL_TOLERANCE = 5 // ±5pp
+
 const CASE_NONE = 0
 const CASE_AWAITING_PANEL = 1
 const CASE_OPEN = 2
 const CASE_REVEALING = 3
-const CASE_RESOLVED = 4
-const CASE_DEFAULT_RESOLVED = 5
+const CASE_APPEALABLE_RESOLVED = 4
+const CASE_APPEAL_AWAITING_PANEL = 5
+const CASE_APPEAL_OPEN = 6
+const CASE_APPEAL_REVEALING = 7
+const CASE_RESOLVED = 8
+const CASE_DEFAULT_RESOLVED = 9
 
 async function deployFixture() {
   const signers = await ethers.getSigners()
@@ -69,6 +79,10 @@ async function deployFixture() {
       stakeRequirement: STAKE_REQ,
       panelFeeBps: PANEL_FEE_BPS,
       treasury: treasury.address,
+      appealWindow: APPEAL_WINDOW,
+      appealPanelSize: APPEAL_PANEL_SIZE,
+      appealBondAmount: APPEAL_BOND,
+      appealOverturnTolerance: APPEAL_TOLERANCE,
     }
   )) as unknown as Aegis
   await aegis.waitForDeployment()
@@ -96,6 +110,16 @@ async function deployFixture() {
     arbiterSigners,
     stranger,
   }
+}
+
+/**
+ * After the original-panel verdict is staged in `AppealableResolved`,
+ * this helper advances past the appeal window and calls finalize again,
+ * which applies the original verdict to the underlying escrow.
+ */
+async function settleNoAppeal(aegis: Aegis, caseId: string): Promise<void> {
+  await time.increase(APPEAL_WINDOW + 1)
+  await aegis.finalize(caseId)
 }
 
 /**
@@ -194,6 +218,10 @@ describe("Aegis", () => {
           stakeRequirement: 0,
           panelFeeBps: 0,
           treasury: treasury.address,
+          appealWindow: APPEAL_WINDOW,
+          appealPanelSize: APPEAL_PANEL_SIZE,
+          appealBondAmount: APPEAL_BOND,
+          appealOverturnTolerance: APPEAL_TOLERANCE,
         })
       ).to.be.revertedWithCustomError(aegis, "InvalidPolicy")
     })
@@ -435,8 +463,10 @@ describe("Aegis", () => {
           .revealVote(caseId, v.pct, v.salt, v.digest)
       }
 
-      // finalize (anyone)
+      // finalize (anyone) — stages the verdict in AppealableResolved.
       await aegis.finalize(caseId)
+      // No appeal: advance past window + finalize again to apply.
+      await settleNoAppeal(aegis, caseId)
 
       const c = await aegis.getCase(caseId)
       expect(c.status).to.equal(CASE_RESOLVED)
@@ -617,9 +647,13 @@ describe("Aegis", () => {
         const v = votes[i]
         await aegis.connect(panelSigners[i]).revealVote(caseId, v.pct, v.salt, v.digest)
       }
-      // No window advance; should resolve because all 3 revealed.
+      // No window advance; should stage the verdict because all 3 revealed.
       await aegis.finalize(caseId)
-      const c = await aegis.getCase(caseId)
+      let c = await aegis.getCase(caseId)
+      expect(c.status).to.equal(CASE_APPEALABLE_RESOLVED)
+      // Then settle after the appeal window.
+      await settleNoAppeal(aegis, caseId)
+      c = await aegis.getCase(caseId)
       expect(c.status).to.equal(CASE_RESOLVED)
     })
 
@@ -642,11 +676,9 @@ describe("Aegis", () => {
       }
       await time.increase(REVEAL_WINDOW + 1)
       const tx = await aegis.finalize(caseId)
-      const c = await aegis.getCase(caseId)
-      expect(c.status).to.equal(CASE_RESOLVED)
-      // Median of 2 reveals = lower middle = 20. Confirm via event.
+      // Confirms the verdict was staged with median 20 via the appeal-staging event.
       const receipt = await tx.wait()
-      const resolved = receipt!.logs
+      const appealable = receipt!.logs
         .map((l) => {
           try {
             return aegis.interface.parseLog(l as any)
@@ -654,8 +686,12 @@ describe("Aegis", () => {
             return null
           }
         })
-        .find((e) => e?.name === "CaseResolved")
-      expect(resolved!.args.medianPercentage).to.equal(20)
+        .find((e) => e?.name === "CaseAppealable")
+      expect(appealable!.args.originalPercentage).to.equal(20)
+      // Then settle.
+      await settleNoAppeal(aegis, caseId)
+      const c = await aegis.getCase(caseId)
+      expect(c.status).to.equal(CASE_RESOLVED)
     })
   })
 
@@ -808,6 +844,10 @@ describe("Aegis", () => {
         stakeRequirement: elcp("200"),
         panelFeeBps: 7000,
         treasury: treasury.address,
+        appealWindow: APPEAL_WINDOW,
+        appealPanelSize: APPEAL_PANEL_SIZE,
+        appealBondAmount: APPEAL_BOND,
+        appealOverturnTolerance: APPEAL_TOLERANCE,
       })
       const p = await aegis.policy()
       expect(p.panelSize).to.equal(5)
@@ -875,8 +915,9 @@ describe("Aegis", () => {
         await aegis.connect(panelSigners[i]).revealVote(caseId, v.pct, v.salt, v.digest)
       }
       await aegis.finalize(caseId)
+      await settleNoAppeal(aegis, caseId)
 
-      // After resolution, lockedStake is zero and unstake works.
+      // After settlement, lockedStake is zero and unstake works.
       for (const p of panelSigners) {
         expect(await aegis.lockedStake(p.address)).to.equal(0)
       }
@@ -921,6 +962,290 @@ describe("Aegis", () => {
     })
   })
 
+  describe("appeals", () => {
+    /**
+     * Drive the original-panel through commit-reveal with the supplied
+     * percentages. Returns the AppealableResolved case state and the
+     * panelSigners (so tests can subsequently appeal).
+     */
+    async function resolveOriginalToVerdict(
+      pcts: number[] = [30, 50, 70],
+    ) {
+      const ctx = await openCaseFixture()
+      const { aegis, panelSigners, caseId } = ctx
+      for (let i = 0; i < panelSigners.length; i++) {
+        const h = await aegis.hashVote(
+          panelSigners[i].address,
+          caseId,
+          pcts[i],
+          ethers.id(`s${i}`),
+          ethers.id(`d${i}`),
+        )
+        await aegis.connect(panelSigners[i]).commitVote(caseId, h)
+      }
+      await time.increase(VOTE_WINDOW + 1)
+      for (let i = 0; i < panelSigners.length; i++) {
+        await aegis
+          .connect(panelSigners[i])
+          .revealVote(
+            caseId,
+            pcts[i],
+            ethers.id(`s${i}`),
+            ethers.id(`d${i}`),
+          )
+      }
+      await aegis.finalize(caseId)
+      return ctx
+    }
+
+    /** Open + fulfill the appeal-panel VRF and return the new panel. */
+    async function fulfillAppealPanel(aegis: Aegis, coordinator: MockVRFCoordinator, requestId: bigint) {
+      const fulfillTx = await coordinator.fulfillWithSingleWord(requestId, 0xa11bea1n)
+      const fulfillReceipt = await fulfillTx.wait()
+      const seated = fulfillReceipt!.logs
+        .map((l) => {
+          try {
+            return aegis.interface.parseLog(l as any)
+          } catch {
+            return null
+          }
+        })
+        .find((e) => e?.name === "AppealPanelSeated")
+      return (seated!.args.panel as string[]).map((a) => a.toLowerCase())
+    }
+
+    /** Register + stake 2 extra arbiters so the appeal panel of 5 can be filled
+     *  (fixture has 6, 3 are on the original panel and excluded). */
+    async function topUpArbiters(ctx: Awaited<ReturnType<typeof resolveOriginalToVerdict>>) {
+      const allSigners = await ethers.getSigners()
+      const extras = allSigners.slice(11, 13)
+      for (const s of extras) {
+        await ctx.elcpToken.mint(s.address, elcp("10000"))
+        await ctx.elcpToken
+          .connect(s)
+          .approve(await ctx.aegis.getAddress(), ethers.MaxUint256)
+        await ctx.aegis
+          .connect(ctx.governance)
+          .registerArbiter(s.address, ethers.ZeroHash)
+        await ctx.aegis.connect(s).stake(STAKE_REQ)
+      }
+      return extras
+    }
+
+    it("a party can appeal within the appeal window and pays a bond", async () => {
+      const ctx = await resolveOriginalToVerdict()
+      await topUpArbiters(ctx)
+      const { aegis, partyA, elcpToken } = ctx
+      // partyA needs ELCP for the bond.
+      await elcpToken.mint(partyA.address, APPEAL_BOND)
+      await elcpToken.connect(partyA).approve(await aegis.getAddress(), APPEAL_BOND)
+
+      const before = await elcpToken.balanceOf(partyA.address)
+      await aegis.connect(partyA).requestAppeal(ctx.caseId)
+      expect(await elcpToken.balanceOf(partyA.address)).to.equal(before - APPEAL_BOND)
+
+      const c = await aegis.getCase(ctx.caseId)
+      expect(c.status).to.equal(CASE_APPEAL_AWAITING_PANEL)
+      const a = await aegis.appeals(ctx.caseId)
+      expect(a.exists).to.equal(true)
+      expect(a.appellant).to.equal(partyA.address)
+    })
+
+    it("rejects appeals from non-parties", async () => {
+      const ctx = await resolveOriginalToVerdict()
+      const { aegis, stranger } = ctx
+      await expect(
+        aegis.connect(stranger).requestAppeal(ctx.caseId),
+      ).to.be.revertedWithCustomError(aegis, "AppealantNotParty")
+    })
+
+    it("rejects appeals after the window closes", async () => {
+      const ctx = await resolveOriginalToVerdict()
+      const { aegis, partyA, elcpToken } = ctx
+      await elcpToken.mint(partyA.address, APPEAL_BOND)
+      await elcpToken.connect(partyA).approve(await aegis.getAddress(), APPEAL_BOND)
+      await time.increase(APPEAL_WINDOW + 1)
+      await expect(
+        aegis.connect(partyA).requestAppeal(ctx.caseId),
+      ).to.be.revertedWithCustomError(aegis, "AppealWindowClosed")
+    })
+
+    it("appeal upheld: original verdict applies, bond goes to appeal panel", async () => {
+      // Original median 50, appeal panel returns ~50 → upheld (within tolerance).
+      const ctx = await resolveOriginalToVerdict([45, 50, 55])
+      const { aegis, coordinator, mock, partyA, elcpToken, arbiterSigners } = ctx
+      await elcpToken.mint(partyA.address, APPEAL_BOND)
+      await elcpToken.connect(partyA).approve(await aegis.getAddress(), APPEAL_BOND)
+
+      // Need 5 eligible appeal panelists. Fixture has 6 arbiters; 3 are on
+      // the original panel and excluded — only 3 remain. Register +
+      // stake 2 more so the appeal panel can be filled.
+      const { arbiterSigners: signers } = ctx
+      const { governance } = ctx
+      // (NOTE: ctx already has 6 staked. We need +2 more.)
+      const allSigners = await ethers.getSigners()
+      const extraArbiters = allSigners.slice(11, 13) // beyond the fixture's 7
+      for (const s of extraArbiters) {
+        await elcpToken.mint(s.address, elcp("10000"))
+        await elcpToken.connect(s).approve(await aegis.getAddress(), ethers.MaxUint256)
+        await aegis.connect(governance).registerArbiter(s.address, ethers.ZeroHash)
+        await aegis.connect(s).stake(STAKE_REQ)
+      }
+
+      // Request appeal.
+      const reqTx = await aegis.connect(partyA).requestAppeal(ctx.caseId)
+      const reqReceipt = await reqTx.wait()
+      const reqLog = reqReceipt!.logs
+        .map((l) => {
+          try {
+            return aegis.interface.parseLog(l as any)
+          } catch {
+            return null
+          }
+        })
+        .find((e) => e?.name === "AppealRequested")
+      const requestId = reqLog!.args.vrfRequestId as bigint
+
+      // Seat appeal panel.
+      const appealPanel = await fulfillAppealPanel(aegis, coordinator, requestId)
+      expect(appealPanel.length).to.equal(APPEAL_PANEL_SIZE)
+      // Original panel must be excluded.
+      const originalPanel = (ctx.panelSigners.map((s) => s.address.toLowerCase()))
+      for (const a of appealPanel) {
+        expect(originalPanel).to.not.include(a)
+      }
+
+      // Appeal panel votes within tolerance — every vote 50.
+      const appealSigners = [...arbiterSigners, ...extraArbiters].filter((s) =>
+        appealPanel.includes(s.address.toLowerCase()),
+      )
+      for (let i = 0; i < appealSigners.length; i++) {
+        const h = await aegis.hashVote(
+          appealSigners[i].address,
+          ctx.caseId,
+          50,
+          ethers.id(`as${i}`),
+          ethers.id(`ad${i}`),
+        )
+        await aegis.connect(appealSigners[i]).appealCommitVote(ctx.caseId, h)
+      }
+      await time.increase(VOTE_WINDOW + 1)
+      for (let i = 0; i < appealSigners.length; i++) {
+        await aegis
+          .connect(appealSigners[i])
+          .appealRevealVote(ctx.caseId, 50, ethers.id(`as${i}`), ethers.id(`ad${i}`))
+      }
+
+      // Finalize the appeal — upheld path.
+      const finTx = await aegis.finalize(ctx.caseId)
+      const finReceipt = await finTx.wait()
+      const upheld = finReceipt!.logs
+        .map((l) => {
+          try {
+            return aegis.interface.parseLog(l as any)
+          } catch {
+            return null
+          }
+        })
+        .find((e) => e?.name === "AppealUpheld")
+      expect(upheld).to.exist
+
+      // Underlying mock case settled at the ORIGINAL median (50).
+      const settled = await mock.cases(CASE_KEY)
+      expect(settled.partyAPercentage).to.equal(50)
+
+      // Appeal panel got the bond. Each appeal panelist's claimable in ELCP
+      // is at least bond/panelSize (modulo dust to treasury).
+      const elcpAddr = await elcpToken.getAddress()
+      const expectedPerAppeal = (APPEAL_BOND * BigInt(PANEL_FEE_BPS)) / 10_000n / BigInt(APPEAL_PANEL_SIZE)
+      for (const s of appealSigners) {
+        expect(await aegis.claimable(s.address, elcpAddr)).to.equal(expectedPerAppeal)
+      }
+      void signers
+    })
+
+    it("appeal overturned: original panel slashed, bond refunded, appeal verdict applies", async () => {
+      // Original median 50, appeal panel returns 90 → overturned.
+      const ctx = await resolveOriginalToVerdict([45, 50, 55])
+      const { aegis, coordinator, mock, partyA, elcpToken, arbiterSigners, governance, panelSigners } = ctx
+      await elcpToken.mint(partyA.address, APPEAL_BOND)
+      await elcpToken.connect(partyA).approve(await aegis.getAddress(), APPEAL_BOND)
+
+      const allSigners = await ethers.getSigners()
+      const extraArbiters = allSigners.slice(11, 13)
+      for (const s of extraArbiters) {
+        await elcpToken.mint(s.address, elcp("10000"))
+        await elcpToken.connect(s).approve(await aegis.getAddress(), ethers.MaxUint256)
+        await aegis.connect(governance).registerArbiter(s.address, ethers.ZeroHash)
+        await aegis.connect(s).stake(STAKE_REQ)
+      }
+
+      const partyABalBefore = await elcpToken.balanceOf(partyA.address)
+      const reqTx = await aegis.connect(partyA).requestAppeal(ctx.caseId)
+      const reqReceipt = await reqTx.wait()
+      const reqLog = reqReceipt!.logs
+        .map((l) => {
+          try {
+            return aegis.interface.parseLog(l as any)
+          } catch {
+            return null
+          }
+        })
+        .find((e) => e?.name === "AppealRequested")
+      const requestId = reqLog!.args.vrfRequestId as bigint
+
+      const appealPanel = await fulfillAppealPanel(aegis, coordinator, requestId)
+      const appealSigners = [...arbiterSigners, ...extraArbiters].filter((s) =>
+        appealPanel.includes(s.address.toLowerCase()),
+      )
+
+      // Appeal panel returns 90 — far outside tolerance, original overturned.
+      for (let i = 0; i < appealSigners.length; i++) {
+        const h = await aegis.hashVote(
+          appealSigners[i].address,
+          ctx.caseId,
+          90,
+          ethers.id(`as${i}`),
+          ethers.id(`ad${i}`),
+        )
+        await aegis.connect(appealSigners[i]).appealCommitVote(ctx.caseId, h)
+      }
+      await time.increase(VOTE_WINDOW + 1)
+      for (let i = 0; i < appealSigners.length; i++) {
+        await aegis
+          .connect(appealSigners[i])
+          .appealRevealVote(ctx.caseId, 90, ethers.id(`as${i}`), ethers.id(`ad${i}`))
+      }
+
+      const finTx = await aegis.finalize(ctx.caseId)
+      const finReceipt = await finTx.wait()
+      const overturned = finReceipt!.logs
+        .map((l) => {
+          try {
+            return aegis.interface.parseLog(l as any)
+          } catch {
+            return null
+          }
+        })
+        .find((e) => e?.name === "AppealOverturned")
+      expect(overturned).to.exist
+      expect(overturned!.args.appealPercentage).to.equal(90)
+
+      // Underlying mock case settled at the APPEAL median (90).
+      const settled = await mock.cases(CASE_KEY)
+      expect(settled.partyAPercentage).to.equal(90)
+
+      // Original panel each lost STAKE_REQ.
+      for (const p of panelSigners) {
+        const a = await aegis.arbiters(p.address)
+        expect(a.stakedAmount).to.equal(0)
+      }
+
+      // Appellant got their bond back.
+      expect(await elcpToken.balanceOf(partyA.address)).to.equal(partyABalBefore)
+    })
+  })
+
   describe("claim", () => {
     it("panelists can claim accrued fees", async () => {
       const ctx = await openCaseFixture()
@@ -941,6 +1266,7 @@ describe("Aegis", () => {
         await aegis.connect(panelSigners[i]).revealVote(caseId, v.pct, v.salt, v.digest)
       }
       await aegis.finalize(caseId)
+      await settleNoAppeal(aegis, caseId)
 
       const usdcAddr = await usdcToken.getAddress()
       const me = panelSigners[0]

@@ -78,6 +78,10 @@ async function fixture() {
       stakeRequirement: STAKE_REQ,
       panelFeeBps: PANEL_FEE_BPS,
       treasury: treasury.address,
+      appealWindow: 60 * 60 * 24 * 7, // 7 days
+      appealPanelSize: 5,
+      appealBondAmount: ethers.parseEther("200"),
+      appealOverturnTolerance: 5,
     }
   )) as unknown as Aegis
   await aegis.waitForDeployment()
@@ -271,6 +275,11 @@ describe("Aegis ↔ VaultraEscrow integration", () => {
     const clientUsdcBefore = await usdcToken.balanceOf(client.getAddress())
     const workerUsdcBefore = await usdcToken.balanceOf(worker.getAddress())
 
+    // Stage the verdict (AppealableResolved) — escrow not yet settled.
+    await aegis.finalize(aegisCaseId)
+    // No appeal: advance past the 7-day appeal window and finalize again
+    // to apply the verdict to Vaultra.
+    await time.increase(60 * 60 * 24 * 7 + 1)
     await aegis.finalize(aegisCaseId)
 
     // ── Assertions: Vaultra escrow resolved at the median (50%) ─────

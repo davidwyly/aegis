@@ -1,5 +1,50 @@
 # Changelog
 
+## v0.2.0 — appeals layer (unreleased)
+
+### Added
+- **Appeals (option 1, same-court).** Verdicts now stage in
+  `AppealableResolved` for `policy.appealWindow` (default 7 days).
+  Either party can call `requestAppeal(caseId)` within the window
+  by posting an ELCP bond (default 2× stakeRequirement). VRF picks
+  a larger appeal panel (default 5) excluding the original panel;
+  they re-arbitrate via the same commit-reveal pattern
+  (`appealCommitVote`, `appealRevealVote`).
+- **Verdict comparison with tolerance.** If the appeal panel's median
+  is within `policy.appealOverturnTolerance` percentage points (default
+  5) of the original, the original verdict is *upheld* — bond pays the
+  appeal panel + treasury, original panel paid normally from escrow fee.
+  If outside tolerance, the verdict is *overturned* — original panel
+  slashed (one bond each), appellant's bond refunded, the appeal verdict
+  applies to the underlying escrow, and the appeal panel takes both the
+  slashed amount and the escrow fee.
+- **Stall handling.** Appeal panel stall ⇒ slash non-revealers,
+  forfeit bond to treasury, settle the original verdict. No
+  recursive appeals.
+- **Eligibility prechecks.** `requestAppeal` rejects fast if the
+  eligible pool can't seat the appeal panel size, before taking the
+  bond or paying VRF gas.
+- **8 new events** + **5 new errors** for the appeal flow.
+- **Frontend `AppealButton`** on the per-case page when status is
+  `appealable_resolved` and the viewer is a party.
+- **DB schema** gains 4 case-status enum values; indexer handles the
+  appeal-stage transitions.
+- **Governance form** (`/governance`) now sets all four appeal
+  parameters.
+
+### Tests
+- 5 new hardhat specs (file-within-window, non-party reject, late-window
+  reject, upheld path, overturned path).
+- 43 hardhat passing total (was 38).
+
+### Notes
+- Settlement now lags 7 days behind the original panel verdict for
+  cases that aren't appealed. Cost of having appeals at all; tunable
+  via `policy.appealWindow`.
+- Recuse path keeps the prevrandao seed (panelist-initiated, not
+  pre-targetable). Only `openDispute`, `_stallAndRedraw`, and
+  `requestAppeal` use VRF.
+
 ## v0.1.0 — initial v1 (unreleased)
 
 ### Contracts
