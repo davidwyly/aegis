@@ -43,6 +43,8 @@ export interface ArbiterProfile {
     reason: string | null
     declaredAt: Date
   }>
+  /** Public encryption pubkey (X25519, hex), or null if not configured. */
+  encryptionPubkey: string | null
 }
 
 const lower = (a: string) => a.toLowerCase()
@@ -59,6 +61,10 @@ export async function readArbiterProfile(addressInput: string): Promise<ArbiterP
   const declaredRows = await db.query.arbiterConflicts.findMany({
     where: eq(schema.arbiterConflicts.arbiterAddress, address),
     orderBy: (c, { desc }) => [desc(c.declaredAt)],
+  })
+
+  const keyRow = await db.query.arbiterKeys.findFirst({
+    where: eq(schema.arbiterKeys.address, address),
   })
 
   // All panel-member rows for this address — joined to cases for context.
@@ -150,6 +156,7 @@ export async function readArbiterProfile(addressInput: string): Promise<ArbiterP
       reason: r.reason ?? null,
       declaredAt: r.declaredAt,
     })),
+    encryptionPubkey: keyRow?.pubkey ?? null,
   }
 }
 
