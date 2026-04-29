@@ -537,19 +537,128 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
     // arbiter happy path; Phase 4 implements the appeal flow.
     // ============================================================
 
-    function openDispute(IArbitrableEscrow /*escrow*/, bytes32 /*escrowCaseId*/)
+    /// @notice Step 1 of two-phase case opening. Records the case in
+    /// `AwaitingArbiter` state and requests randomness from the VRF
+    /// coordinator. Arbiter selection happens later in the VRF callback.
+    /// Returns the Aegis caseId — the keeper indexes the case immediately
+    /// even though the arbiter won't be drawn until fulfillment lands.
+    function openDispute(IArbitrableEscrow escrow, bytes32 escrowCaseId)
         external
         nonReentrant
-        returns (bytes32)
+        returns (bytes32 caseId)
     {
-        revert NotImplemented();
+        if (newCasesPaused) revert CasePaused();
+        if (address(escrow) == address(0)) revert ZeroAddress();
+
+        if (liveCaseFor[address(escrow)][escrowCaseId] != bytes32(0)) {
+            revert CaseAlreadyLive();
+        }
+
+        (
+            address partyA,
+            address partyB,
+            address feeToken,
+            uint256 amount,
+            bool active
+        ) = escrow.getDisputeContext(escrowCaseId);
+        if (!active) revert EscrowReportsInactive();
+        if (partyA == address(0) || partyB == address(0)) revert ZeroAddress();
+        if (feeToken == address(0)) revert ZeroAddress();
+
+        unchecked { ++_caseNonce; }
+        caseId = keccak256(abi.encode(address(escrow), escrowCaseId, _caseNonce));
+        if (_cases[caseId].state != CaseState.None) revert CaseExists();
+        liveCaseFor[address(escrow)][escrowCaseId] = caseId;
+
+        // Fail fast: if the eligible pool can't seat one arbiter, don't
+        // pay VRF gas for a request that fulfillRandomWords would revert on.
+        address[] memory noExclude;
+        if (_eligibleArbiterCount(partyA, partyB, noExclude) == 0) {
+            revert NotEnoughArbiters();
+        }
+
+        Case storage c = _cases[caseId];
+        c.escrow = address(escrow);
+        c.escrowCaseId = escrowCaseId;
+        c.partyA = partyA;
+        c.partyB = partyB;
+        c.feeToken = feeToken;
+        c.amount = amount;
+        c.openedAt = uint64(block.timestamp);
+        c.state = CaseState.AwaitingArbiter;
+
+        VrfConfig memory cfg = vrfConfig;
+        uint256 requestId = IVRFCoordinator(vrfCoordinator).requestRandomWords(
+            cfg.keyHash,
+            cfg.subscriptionId,
+            cfg.requestConfirmations,
+            cfg.callbackGasLimit,
+            1
+        );
+        requestToCase[requestId] = caseId;
+
+        emit CaseRequested(
+            caseId, address(escrow), escrowCaseId,
+            partyA, partyB, feeToken, amount, requestId
+        );
+        emit CaseOpened(
+            caseId, address(escrow), escrowCaseId,
+            partyA, partyB, feeToken, amount
+        );
     }
 
-    function fulfillRandomWords(uint256 /*requestId*/, uint256[] calldata /*randomWords*/)
+    /// @notice VRF callback. Routes by case state — original-arbiter
+    /// draw on `AwaitingArbiter`, appeal-arbiter draw on
+    /// `AwaitingAppealPanel`. Both paths reuse `_drawArbiter` /
+    /// `_drawTwoArbiters` from the sortition section.
+    function fulfillRandomWords(uint256 requestId, uint256[] calldata randomWords)
         internal
         override
     {
-        revert NotImplemented();
+        bytes32 caseId = requestToCase[requestId];
+        if (caseId == bytes32(0)) revert UnknownVrfRequest();
+        delete requestToCase[requestId];
+
+        Case storage c = _cases[caseId];
+
+        if (c.state == CaseState.AwaitingArbiter) {
+            _drawOriginal(c, caseId, randomWords[0]);
+            return;
+        }
+
+        if (c.state == CaseState.AwaitingAppealPanel) {
+            revert NotImplemented(); // Phase 4
+        }
+
+        revert CaseNotAwaitingPanel();
+    }
+
+    /// @dev Draw the original arbiter, lock stake, set deadlines,
+    /// transition to Voting. Used by both initial fulfill (round 0)
+    /// and stall-redraw (round 1, future). On a redraw, the prior
+    /// arbiter is excluded from the eligible pool.
+    function _drawOriginal(Case storage c, bytes32 caseId, uint256 seed) internal {
+        address[] memory exclude;
+        if (c.originalArbiter != address(0)) {
+            exclude = new address[](1);
+            exclude[0] = c.originalArbiter;
+        }
+
+        address drawn = _drawArbiter(seed, c.partyA, c.partyB, exclude);
+
+        Policy memory p = policy;
+        arbiters[drawn].caseCount += 1;
+        lockedStake[drawn] += uint96(p.stakeRequirement);
+        lastArbitratedAt[_partyPairKey(c.partyA, c.partyB)][drawn] = uint64(block.timestamp);
+
+        c.originalArbiter = drawn;
+        c.originalCommitHash = bytes32(0);
+        c.originalRevealed = false;
+        c.originalCommitDeadline = uint64(block.timestamp + p.commitWindow);
+        c.originalRevealDeadline = uint64(block.timestamp + p.commitWindow + p.revealWindow);
+        c.state = CaseState.Voting;
+
+        emit ArbiterDrawn(caseId, drawn);
     }
 
     function recuse(bytes32 /*caseId*/) external nonReentrant {
