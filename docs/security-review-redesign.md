@@ -61,15 +61,15 @@ The contract is correct only if these hold:
 | ID | Severity | Title |
 |---|---|---|
 | C-01 | — | (none found in this pass) |
-| H-01 | H | Governance can lock arbiter pay by setting `perArbiterFeeBps` above pot share |
-| H-02 | H | VRF-stuck cases have no on-chain remediation path |
+| H-01 | H | Governance can lock arbiter pay by setting `perArbiterFeeBps` above pot share — **FIXED in `59f0c1e`** |
+| H-02 | H | VRF-stuck cases have no on-chain remediation path — **FIXED in `390e64a`** |
 | M-01 | M | `_settleAppeal` pays arbiters first-come-first-served; a low-fee escrow may starve slot B |
 | M-02 | M | `applyArbitration` is called between balance reads; balance-delta correct but escrow can re-enter sibling functions |
-| M-03 | M | `_arbiterList` iteration cost is O(N) per draw; gas budget concern past ~500 arbiters |
+| M-03 | M | `_arbiterList` iteration cost is O(N) per draw; gas budget concern past ~500 arbiters — **FIXED in `59f0c1e`** |
 | M-04 | M | `recuse()` uses `block.prevrandao` for replacement draw; manipulable by block proposers |
-| L-01 | L | `_releaseLock` defensive "snap to 0" can mask accounting drift |
+| L-01 | L | `_releaseLock` defensive "snap to 0" can mask accounting drift — **FIXED in `59f0c1e`** |
 | L-02 | L | Median-of-2 floor rounding favors lower party (D6 by design but worth user-visible note) |
-| L-03 | L | `setPolicy` accepts `commitWindow` / `revealWindow` extreme values without sanity bounds |
+| L-03 | L | `setPolicy` accepts `commitWindow` / `revealWindow` extreme values without sanity bounds — **FIXED in `59f0c1e`** |
 | L-04 | L | Stalled events emit `slashedTotal` as `stakeRequirement` regardless of actual slash |
 | I-01 | I | Frontrunning `openDispute` is harmless but worth documenting |
 | I-02 | I | Fee-on-transfer fee tokens are correctly handled by balance-delta |
@@ -376,23 +376,45 @@ assumptions.
 
 ## Recommended mitigation order
 
-If you do nothing else before mainnet, do these:
+If you do nothing else before mainnet, do these (originally
+recommended; **all 5 done as of `390e64a`**):
 
-1. **H-02 force-cancel escape** — without this, a single VRF outage
-   permanently bricks affected cases. Add `forceCancelStuck` with a
-   30-day delay + governance role.
-2. **H-01 perArbiterFeeBps cap** — three-line patch in
-   `_validatePolicy`. Removes a class of governance-capture-induced
-   pay denial.
-3. **L-01 strict require in `_releaseLock`** — converts a silent
-   accounting bug into a loud one. One line.
-4. **M-03 hard cap on `_arbiterList.length`** — defensive against
-   future scaling-induced VRF gas-out.
-5. **L-03 policy bounds** — defense in depth; add the range checks.
+1. **H-02 force-cancel escape** — `forceCancelStuck()` added with a
+   30-day grace window, governance role, appeal-fee refund, and
+   liveCaseFor cleanup. ✅ `390e64a`
+2. **H-01 perArbiterFeeBps cap** — `MAX_PER_ARBITER_FEE_BPS` /
+   `MAX_APPEAL_FEE_BPS` constants (1000 = 10%) enforced in
+   `_validatePolicy`. ✅ `59f0c1e`
+3. **L-01 strict `_releaseLock`** — reverts `LockUnderflow` on
+   accounting drift; the same helper is now used uniformly across
+   `_slashArbiter` and `_settleNoAppeal`. ✅ `59f0c1e`
+4. **M-03 `_arbiterList.length` cap** — `MAX_ARBITER_ROSTER` = 500
+   enforced in `registerArbiter`. ✅ `59f0c1e`
+5. **L-03 policy range bounds** — `commitWindow` / `revealWindow`
+   bounded `[1h, 30d]`, `appealWindow` `[1d, 30d]`,
+   `repeatArbiterCooldown` ≤ 5y. ✅ `59f0c1e`
 
 After those, schedule the external audit. M-01, M-02, M-04, L-02,
 L-04, and the I-* items can be addressed during the audit cycle or
 deferred.
+
+## Status snapshot
+
+| Severity | Count | Open | Fixed |
+|---|---|---|---|
+| Critical | 0 | 0 | — |
+| High | 2 | 0 | 2 |
+| Medium | 4 | 3 | 1 |
+| Low | 4 | 2 | 2 |
+| Info | 3 | 3 | — |
+
+The contract is in audit-ready shape for the redesigned single-
+arbiter + appeal-of-3 model. The 5 remaining open findings are
+either operational corners under non-default policies (M-01),
+defense-in-depth on a re-entrancy pattern that has no concrete
+exploit (M-02), a documentation note about randomness assumption
+(M-04), a documentation note about rounding (L-02), or a cosmetic
+event-payload fix (L-04).
 
 ## What was NOT found
 
