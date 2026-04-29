@@ -12,6 +12,7 @@ import { getSession } from "@/lib/auth/session"
 import { CaseStatusBadge } from "@/components/case-status-badge"
 import { BriefEditor } from "@/components/brief-editor"
 import { CommitRevealForm } from "@/components/commit-reveal-form"
+import { SaltRecoveryBanner } from "@/components/salt-recovery-banner"
 import { EvidencePanel } from "@/components/evidence-panel"
 import { CaseTimeline } from "@/components/case-timeline"
 import { assembleTimeline } from "@/lib/cases/timeline"
@@ -447,6 +448,16 @@ export default async function CaseDetailPage({
           <CaseTimeline events={timeline} />
         </div>
       </section>
+
+      {/* Sticky red banner for arbiters who've committed but haven't
+          acknowledged saving their recovery file. Self-gates on
+          localStorage; renders nothing if no commit stash exists. */}
+      {isAssignedArbiter && (
+        <SaltRecoveryBanner
+          aegisAddress={c.aegisAddress as `0x${string}`}
+          caseId={c.caseId as `0x${string}`}
+        />
+      )}
     </div>
   )
 }
