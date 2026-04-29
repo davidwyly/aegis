@@ -11,6 +11,18 @@ Status: **draft** — coupled to the arbitration redesign in
 3–7 arbiters with a single original arbiter + 2-arbiter appeal
 augmentation; the UI must reflect this shift.
 
+## Reference design
+
+The canonical visual reference lives at
+`docs/design-mockups/arbiter-case-commit.png` — a fully-realized
+mockup of the **arbiter case view during the commit phase**, with
+the salt-recovery banner. Treat it as the locked baseline for
+look-and-feel; everything else in this doc is the prose contract
+the implementation must satisfy. Details (countdown format,
+progressive disclosure of commit vs reveal, etc.) can be tweaked
+during build, but the overall density, palette, framing copy, and
+salt-recovery flow are the reference.
+
 ## Design language
 
 Aegis is a **court**, not a marketing site. The vibe is text-dense,
