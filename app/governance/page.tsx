@@ -8,17 +8,15 @@ type Action =
   | { kind: "revokeArbiter"; arbiter: string }
   | {
       kind: "setPolicy"
-      panelSize: number
-      voteWindow: number
+      commitWindow: number
       revealWindow: number
       graceWindow: number
-      stakeRequirement: string
-      panelFeeBps: number
-      treasury: string
       appealWindow: number
-      appealPanelSize: number
-      appealBondAmount: string
-      appealOverturnTolerance: number
+      repeatArbiterCooldown: number
+      stakeRequirement: string
+      appealFeeBps: number
+      perArbiterFeeBps: number
+      treasury: string
     }
   | { kind: "setNewCasesPaused"; paused: boolean }
 
@@ -44,17 +42,15 @@ function buildCalldata(action: Action): `0x${string}` {
         functionName: "setPolicy",
         args: [
           {
-            panelSize: action.panelSize,
-            voteWindow: BigInt(action.voteWindow),
+            commitWindow: BigInt(action.commitWindow),
             revealWindow: BigInt(action.revealWindow),
             graceWindow: BigInt(action.graceWindow),
-            stakeRequirement: BigInt(action.stakeRequirement),
-            panelFeeBps: action.panelFeeBps,
-            treasury: action.treasury as `0x${string}`,
             appealWindow: BigInt(action.appealWindow),
-            appealPanelSize: action.appealPanelSize,
-            appealBondAmount: BigInt(action.appealBondAmount),
-            appealOverturnTolerance: action.appealOverturnTolerance,
+            repeatArbiterCooldown: BigInt(action.repeatArbiterCooldown),
+            stakeRequirement: BigInt(action.stakeRequirement),
+            appealFeeBps: action.appealFeeBps,
+            perArbiterFeeBps: action.perArbiterFeeBps,
+            treasury: action.treasury as `0x${string}`,
           },
         ],
       })
@@ -150,17 +146,15 @@ function defaultsFor(kind: Action["kind"]): Action {
     case "setPolicy":
       return {
         kind: "setPolicy",
-        panelSize: 3,
-        voteWindow: 86_400,
-        revealWindow: 86_400,
-        graceWindow: 43_200,
+        commitWindow: 86_400, // 24h, D7
+        revealWindow: 86_400, // 24h, D8
+        graceWindow: 43_200, // 12h
+        appealWindow: 7 * 86_400, // 7 days, D9
+        repeatArbiterCooldown: 90 * 86_400, // 90 days, D13
         stakeRequirement: "100000000000000000000",
-        panelFeeBps: 8000,
+        appealFeeBps: 250, // 2.5%, D2
+        perArbiterFeeBps: 250, // 2.5%, D4
         treasury: "",
-        appealWindow: 7 * 86_400, // 7 days
-        appealPanelSize: 5,
-        appealBondAmount: "200000000000000000000", // 200 ELCP
-        appealOverturnTolerance: 5, // ±5pp
       }
     case "setNewCasesPaused":
       return { kind: "setNewCasesPaused", paused: false }
@@ -210,23 +204,15 @@ function renderForm(
     case "setPolicy":
       return (
         <>
-          <Field label="Panel size (3, 5, or 7)">
+          <Field label="Commit window (seconds; D7 default 86400 = 24h)">
             <input
               type="number"
               className="input w-full"
-              value={action.panelSize}
-              onChange={(e) => setAction({ ...action, panelSize: Number(e.target.value) })}
+              value={action.commitWindow}
+              onChange={(e) => setAction({ ...action, commitWindow: Number(e.target.value) })}
             />
           </Field>
-          <Field label="Vote window (seconds)">
-            <input
-              type="number"
-              className="input w-full"
-              value={action.voteWindow}
-              onChange={(e) => setAction({ ...action, voteWindow: Number(e.target.value) })}
-            />
-          </Field>
-          <Field label="Reveal window (seconds)">
+          <Field label="Reveal window (seconds; D8 default 86400 = 24h)">
             <input
               type="number"
               className="input w-full"
@@ -242,6 +228,24 @@ function renderForm(
               onChange={(e) => setAction({ ...action, graceWindow: Number(e.target.value) })}
             />
           </Field>
+          <Field label="Appeal window (seconds; D9 default 604800 = 7d)">
+            <input
+              type="number"
+              className="input w-full"
+              value={action.appealWindow}
+              onChange={(e) => setAction({ ...action, appealWindow: Number(e.target.value) })}
+            />
+          </Field>
+          <Field label="Repeat-arbiter cooldown (seconds; D13 default 7776000 = 90d)">
+            <input
+              type="number"
+              className="input w-full"
+              value={action.repeatArbiterCooldown}
+              onChange={(e) =>
+                setAction({ ...action, repeatArbiterCooldown: Number(e.target.value) })
+              }
+            />
+          </Field>
           <Field label="Stake requirement (wei)">
             <input
               className="input w-full font-mono"
@@ -251,12 +255,20 @@ function renderForm(
               }
             />
           </Field>
-          <Field label="Panel fee (bps; 8000 = 80% to panel)">
+          <Field label="Appeal fee (bps; D2 default 250 = 2.5%)">
             <input
               type="number"
               className="input w-full"
-              value={action.panelFeeBps}
-              onChange={(e) => setAction({ ...action, panelFeeBps: Number(e.target.value) })}
+              value={action.appealFeeBps}
+              onChange={(e) => setAction({ ...action, appealFeeBps: Number(e.target.value) })}
+            />
+          </Field>
+          <Field label="Per-arbiter fee (bps; D4 default 250 = 2.5%)">
+            <input
+              type="number"
+              className="input w-full"
+              value={action.perArbiterFeeBps}
+              onChange={(e) => setAction({ ...action, perArbiterFeeBps: Number(e.target.value) })}
             />
           </Field>
           <Field label="Treasury address">

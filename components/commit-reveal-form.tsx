@@ -4,20 +4,25 @@ import { useAccount, useChainId, useWriteContract } from "wagmi"
 import { keccak256, toHex } from "viem"
 import { aegisAbi } from "@/lib/abi/aegis"
 
+/**
+ * Commit-reveal form for an arbiter casting a vote on a case.
+ *
+ * Per de novo (the design doc's blindness property), this form is
+ * phase-agnostic. The same `commitVote` and `revealVote` functions
+ * handle the original arbiter and either appeal-slot arbiter; the
+ * contract routes internally by msg.sender.
+ *
+ * No "appeal" / "panel" / "round" copy in the user-facing strings.
+ */
 export function CommitRevealForm({
   aegisAddress,
   caseId,
   phase,
-  track = "original",
 }: {
   aegisAddress: `0x${string}`
   caseId: `0x${string}`
   phase: "commit" | "reveal" | "closed"
-  /** Which contract function to call. Defaults to original-panel functions. */
-  track?: "original" | "appeal"
 }) {
-  const COMMIT_FN = track === "appeal" ? "appealCommitVote" : "commitVote"
-  const REVEAL_FN = track === "appeal" ? "appealRevealVote" : "revealVote"
   const { address } = useAccount()
   const chainId = useChainId()
   const { writeContractAsync, isPending } = useWriteContract()
@@ -54,12 +59,15 @@ export function CommitRevealForm({
       const tx = await writeContractAsync({
         address: aegisAddress,
         abi: aegisAbi,
-        functionName: COMMIT_FN,
+        functionName: "commitVote",
         args: [caseId, hash],
         chainId,
       })
       setStatus(`Commit submitted: ${tx.slice(0, 10)}…`)
       // Stash salt + pct in localStorage so reveal can look them up.
+      // Critical: if this stash is lost the arbiter cannot reveal and
+      // will be slashed for non-reveal. The case workspace also offers
+      // a downloadable recovery file alongside this localStorage stash.
       window.localStorage.setItem(
         `aegis-vote:${caseId}:${address.toLowerCase()}`,
         JSON.stringify({ pct, salt, rationale }),
@@ -86,7 +94,7 @@ export function CommitRevealForm({
       const tx = await writeContractAsync({
         address: aegisAddress,
         abi: aegisAbi,
-        functionName: REVEAL_FN,
+        functionName: "revealVote",
         args: [caseId, parsed.pct, parsed.salt, rationaleDigest],
         chainId,
       })
@@ -164,7 +172,7 @@ export function CommitRevealForm({
           </div>
           <p className="text-xs text-zinc-500">
             Recusing releases your stake-lock and draws a replacement
-            panelist. Only allowed before you commit.
+            arbiter. Only allowed before you commit.
           </p>
         </>
       ) : (

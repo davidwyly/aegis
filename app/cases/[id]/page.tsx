@@ -390,7 +390,6 @@ export default async function CaseDetailPage({
               aegisAddress={c.aegisAddress as `0x${string}`}
               caseId={c.caseId as `0x${string}`}
               phase={appealPhase}
-              track="appeal"
             />
           </div>
         </section>
