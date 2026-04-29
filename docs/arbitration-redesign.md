@@ -518,19 +518,36 @@ The number of policy knobs **drops by 4** (panel sizes, fee bps,
 tolerance, bond) and gains 3, for a net reduction of 1. Governance
 proposals to "tune the panel" become unnecessary.
 
-### Events
+### Events (designed not to leak appeal context)
+
+To support de novo review, events that reach the arbiter UI must not
+distinguish between original and appeal phases. The keeper / indexer
+needs to know the difference, but only via fields not surfaced to
+arbiters.
 
 - `CaseRequested` — unchanged.
-- `CaseOpened` — change `address[] panel` to `address arbiter`.
-- `Committed` / `Revealed` — unchanged signatures; emitted for
-  original-arbiter or appeal-arbiter equivalently.
-- `CaseAppealable` — unchanged.
-- `AppealRequested` — change to emit `appealFeeAmount` in escrow fee
-  token instead of ELCP bond amount.
-- `CaseResolved` — unchanged signature; emitted exactly once per case
-  (no longer twice for staged-then-applied).
-- New: `OriginalArbiterDrawn(caseId, arbiter)`,
-  `AppealArbitersDrawn(caseId, [a, b])` for indexer clarity.
+- `CaseOpened(caseId, /* no panel field */)` — replaces the current
+  `address[] panel` payload. Drawn arbiters are emitted via
+  `ArbiterDrawn` separately, so a single field rename suffices.
+- `ArbiterDrawn(caseId, arbiter)` — single event for any arbiter
+  draw, original or appeal-slot. No round/phase field. Indexer
+  infers phase from case state at the time of the event.
+- `Committed(caseId, arbiter, hash)` — single event for both phases.
+- `Revealed(caseId, arbiter, percentage, digest)` — single event for
+  both phases.
+- `AppealRequested(caseId, appellant, feeAmount, feeToken)` — emit
+  in the escrow's fee token (not ELCP). Indexer-only; not surfaced
+  in arbiter UI.
+- `CaseResolved(caseId, finalPercentage, digest)` — emitted exactly
+  once per case. No upheld/overturned distinction (no longer
+  meaningful under the 3-quorum design).
+
+Removed: `OriginalArbiterDrawn`, `AppealArbitersDrawn`,
+`CaseAppealable` (the latter was a public "this case is now
+appealable" announcement; with de novo review, that announcement
+would leak appeal context to other arbiters who happen to be in
+the eligible pool — better to keep the appeal-eligibility check
+on-chain via state-machine rather than broadcast it).
 
 ## Implementation phases
 
@@ -613,16 +630,43 @@ will be enum value changes and the `panel[]` → `arbiter` shift.
   `appeal_arbiters_*` per the new model.
 - Auto-finalize logic for the simplified paths.
 
-### Phase 8 — Frontend updates (~full day)
+### Phase 8 — Frontend updates + de novo UX (~full day)
 
-- `components/commit-reveal-form.tsx` — gate visibility of the
-  original verdict in the appeal-phase UI (commit-before-peek).
-- `components/case-timeline.tsx` — render single-arbiter then
-  appeal-augmentation.
+Arbiter-facing changes (de novo + UX hiding):
+
+- `components/commit-reveal-form.tsx` — strip all references to
+  "appeal," "panel," "prior verdict," "round." The form looks
+  identical for original and appeal cases.
+- `components/case-timeline.tsx` — **not rendered to assigned
+  arbiters during their commit phase.** Only parties and the
+  public ledger see the timeline.
+- `app/cases/[id]/page.tsx` — arbiter view shows briefs +
+  evidence only, no state badge, no event log. Party view shows
+  full timeline.
+- `app/queue/page.tsx` — undifferentiated case list. No
+  "original" vs "appeal" labels.
+- Brief submission UI: appeal-time brief submission is **disabled
+  by design** (no new briefs accepted on appeal — see "Brief
+  sanitization" above).
+- Arbiter onboarding (`app/arbiters/[address]`): add the
+  disclosure blurb about original-vs-appeal aggregation.
+
+Party-facing changes:
+
 - `components/appeal-button.tsx` — show 2.5% appeal fee in the
-  escrow's token (not ELCP).
-- `app/cases/[id]/page.tsx` — strip panel-grid UI in favor of
-  arbiter-card UI.
+  escrow's token (not ELCP). Show D12 enforcement: appeal button
+  is hidden if the party fully won (verdict is 100 in their
+  favor).
+- Party case view shows full timeline + state, since they already
+  know the case is in appeal.
+
+Public ledger:
+
+- `app/cases/page.tsx` — strip per-arbiter case counts (D13
+  anonymity). Surface aggregate stats only.
+- Per-case public view excludes assigned-arbiter addresses until
+  after `CaseResolved` (avoids broadcasting "arbiter X is on
+  appeal Y" to potential bribers).
 
 ### Phase 9 — Security review pass (~half day)
 
