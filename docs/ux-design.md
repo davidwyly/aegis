@@ -488,3 +488,82 @@ sanity-check before submitting upstream.
 This is purposefully minimalist; the heavy lifting (proposal
 submission, voting, execution) happens in the DAO's own UI. Aegis's
 governance page just helps build the right calldata.
+
+### Ops dashboard (`/admin`)
+
+Operator-facing diagnostics. Read-only; remediation happens
+out-of-band (refilling LINK, restarting keeper, etc.).
+
+**Health tiles** (top row, 4 across on desktop):
+
+1. **Keeper liveness** — cursor lag in seconds + status traffic
+   light: green (<5min), amber (5–60min), red (>60min). Last
+   indexed block + timestamp.
+
+2. **VRF subscription** — LINK balance on the configured
+   coordinator subscription. Amber if low, red if zero.
+
+3. **Stuck cases** — count of cases in `AwaitingArbiter` or
+   `AwaitingAppealPanel` for >1h (probable VRF stall). Click
+   for the list.
+
+4. **Case backlog** — total in-flight cases, distribution by
+   state.
+
+**Recent events feed** — chronological list of recent on-chain
+events. Useful for at-a-glance "is the system breathing?"
+checking. Filter by event type. Click an event to jump to the
+related case.
+
+**Failure log preview** — top 3 most recent unresolved keeper
+failures with link to the full failures page.
+
+This page is intentionally information-dense. Operators want to
+see everything at a glance, not click through tabs.
+
+### Keeper failures (`/admin/failures`)
+
+The full table of failed keeper operations. Existing component
+`admin-failure-row.tsx`.
+
+**Columns**: When · Failure type (registerCase / openDispute /
+finalize / etc.) · Vaultra escrow ID · Reason (truncated) · Attempts
+counter · Last attempted · Resolution (button: "mark resolved" if
+admin handled it out-of-band).
+
+**Actions**:
+- "Mark resolved" — admin closes the failure record (e.g., they
+  manually called the failed function from a script).
+- "Retry now" — kick the keeper to retry this specific item
+  immediately (if applicable).
+
+**Filters**: status (open / resolved) · age · failure type.
+
+**Empty state**: "No keeper failures recorded. ✓"
+
+### SIWE sign-in flow
+
+Existing `sign-in-button.tsx`. Standard pattern:
+
+1. **Disconnected**: button reads "Connect wallet". On click,
+   shows the wallet selection modal (wagmi connectors).
+
+2. **Connected, not signed in**: button reads "Sign in" + a small
+   address chip. On click, the wallet pops up to sign the SIWE
+   message. After signing, button shows the address chip + a
+   chevron for a dropdown menu (My queue · Profile · Sign out).
+
+3. **Signed in, wrong chain**: button reads "Switch network" in
+   amber. Clicking prompts the wallet to switch.
+
+**SIWE message** is iron-session-backed (already implemented).
+Designer doesn't need to touch the cryptography; just the UI
+states above.
+
+**Edge cases the designer should mock up**:
+- Wallet rejected the connection → toast: "Connection cancelled"
+- Wallet rejected the SIWE signature → toast: "Sign-in cancelled"
+- Network mismatch → persistent banner at the top of the page
+  (not a toast) until user switches.
+- Session expired → auto-prompt re-sign on the next protected
+  action, not on every page load.
