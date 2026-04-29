@@ -922,4 +922,334 @@ describe("Aegis (single-arbiter + appeal-of-3)", () => {
       expect(await aegis.claimable(secondArbiter, usdcAddr)).to.equal(0)
     })
   })
+
+  // ============================================================
+  // Recuse — voluntary departure before commit. No slash; lock
+  // released; replacement drawn synchronously via prevrandao.
+  // ============================================================
+
+  describe("recuse", () => {
+    it("original arbiter recuses before commit; replacement drawn, no slash", async () => {
+      const {
+        aegis,
+        coordinator,
+        mock,
+        governance,
+        partyA,
+        partyB,
+        usdcToken,
+        elcpToken,
+        arbiterSigners,
+      } = await loadFixture(deployFixture)
+      await registerAndStake(aegis, governance, arbiterSigners.slice(0, 6))
+      await stageMockCase(
+        mock,
+        usdcToken,
+        CASE_KEY,
+        partyA.address,
+        partyB.address,
+        usdc("1000"),
+        usdc("50"),
+      )
+      const { caseId, arbiter: firstArbiter } = await openAndDraw(
+        aegis,
+        coordinator,
+        await mock.getAddress(),
+        CASE_KEY,
+      )
+      const firstSigner = arbiterSigners.find((s) => s.address === firstArbiter)!
+
+      // Recuse before committing.
+      const tx = await aegis.connect(firstSigner).recuse(caseId)
+      const receipt = await tx.wait()
+      const recused = receipt!.logs
+        .map((l) => {
+          try {
+            return aegis.interface.parseLog(l as any)
+          } catch {
+            return null
+          }
+        })
+        .find((e) => e?.name === "Recused")
+      expect(recused).to.exist
+      const replacement = recused!.args.replacement as string
+      expect(replacement).to.not.equal(firstArbiter)
+
+      // Recuser's stake is intact (no slash for voluntary departure)
+      // and lock is released.
+      expect((await aegis.arbiters(firstArbiter)).stakedAmount).to.equal(STAKE_REQ)
+      expect(await aegis.lockedStake(firstArbiter)).to.equal(0)
+      expect(await aegis.treasuryAccrued(await elcpToken.getAddress())).to.equal(0)
+
+      // Replacement holds the slot now.
+      const c = await aegis.getCase(caseId)
+      expect(c.originalArbiter).to.equal(replacement)
+      expect(await aegis.lockedStake(replacement)).to.equal(STAKE_REQ)
+      expect(c.state).to.equal(STATE_VOTING)
+    })
+
+    it("rejects recuse after commit", async () => {
+      const {
+        aegis,
+        coordinator,
+        mock,
+        governance,
+        partyA,
+        partyB,
+        usdcToken,
+        arbiterSigners,
+      } = await loadFixture(deployFixture)
+      await registerAndStake(aegis, governance, arbiterSigners.slice(0, 6))
+      await stageMockCase(
+        mock,
+        usdcToken,
+        CASE_KEY,
+        partyA.address,
+        partyB.address,
+        usdc("1000"),
+        usdc("50"),
+      )
+      const { caseId, arbiter } = await openAndDraw(
+        aegis,
+        coordinator,
+        await mock.getAddress(),
+        CASE_KEY,
+      )
+      const signer = arbiterSigners.find((s) => s.address === arbiter)!
+      const salt = ethers.hexlify(ethers.randomBytes(32))
+      const digest = ethers.keccak256(ethers.toUtf8Bytes("d"))
+      const hash = makeCommit(arbiter, caseId, 60, salt, digest)
+      await aegis.connect(signer).commitVote(caseId, hash)
+
+      await expect(aegis.connect(signer).recuse(caseId)).to.be.revertedWithCustomError(
+        aegis,
+        "CannotRecuseAfterCommit",
+      )
+    })
+  })
+
+  // ============================================================
+  // D13 — same arbiter cannot be drawn for the same party-pair
+  // within `repeatArbiterCooldown` seconds (90 days default).
+  // ============================================================
+
+  describe("D13 repeat-arbiter cooldown", () => {
+    it("excludes the prior arbiter from a same-pair case until the cooldown expires", async () => {
+      const {
+        aegis,
+        coordinator,
+        mock,
+        governance,
+        partyA,
+        partyB,
+        usdcToken,
+        arbiterSigners,
+      } = await loadFixture(deployFixture)
+      // Only ONE arbiter in the pool — D13 is the only thing that can
+      // exclude them on the second case.
+      await registerAndStake(aegis, governance, arbiterSigners.slice(0, 1))
+      await stageMockCase(
+        mock,
+        usdcToken,
+        CASE_KEY,
+        partyA.address,
+        partyB.address,
+        usdc("1000"),
+        usdc("50"),
+      )
+      const { caseId, arbiter: firstArbiter } = await openAndDraw(
+        aegis,
+        coordinator,
+        await mock.getAddress(),
+        CASE_KEY,
+      )
+      // Resolve case 1 cleanly so the arbiter's stake unlocks (otherwise
+      // we'd be conflating cooldown with stake-locking).
+      const signer = arbiterSigners.find((s) => s.address === firstArbiter)!
+      await commitAndReveal(aegis, signer, caseId, 60)
+      await time.increase(APPEAL_WINDOW + 1)
+      await aegis.finalize(caseId)
+      expect(await aegis.lockedStake(firstArbiter)).to.equal(0)
+
+      // Re-stake to top up after the no-appeal payout (their balance is
+      // unchanged since no slash, but we don't want any race condition).
+      // Stage a second case between the same parties.
+      const CASE_KEY_2 = ethers.keccak256(ethers.toUtf8Bytes("test-case-2"))
+      await stageMockCase(
+        mock,
+        usdcToken,
+        CASE_KEY_2,
+        partyA.address,
+        partyB.address,
+        usdc("500"),
+        usdc("25"),
+      )
+      // The only registered arbiter is in 90-day cooldown for this party
+      // pair → eligible pool is empty → openDispute reverts.
+      await expect(
+        aegis.openDispute(await mock.getAddress(), CASE_KEY_2),
+      ).to.be.revertedWithCustomError(aegis, "NotEnoughArbiters")
+
+      // Advance past the cooldown — same-pair arbitration is allowed again.
+      await time.increase(REPEAT_COOLDOWN + 1)
+      const reopenTx = await aegis.openDispute(
+        await mock.getAddress(),
+        CASE_KEY_2,
+      )
+      await reopenTx.wait()
+    })
+
+    it("does NOT exclude across different party pairs", async () => {
+      const {
+        aegis,
+        coordinator,
+        mock,
+        governance,
+        partyA,
+        partyB,
+        usdcToken,
+        arbiterSigners,
+      } = await loadFixture(deployFixture)
+      // 1 arbiter; partyA + partyB cooldown should NOT carry over to a
+      // partyA + stranger pair.
+      await registerAndStake(aegis, governance, arbiterSigners.slice(0, 1))
+      await stageMockCase(
+        mock,
+        usdcToken,
+        CASE_KEY,
+        partyA.address,
+        partyB.address,
+        usdc("1000"),
+        usdc("50"),
+      )
+      const { caseId, arbiter } = await openAndDraw(
+        aegis,
+        coordinator,
+        await mock.getAddress(),
+        CASE_KEY,
+      )
+      const signer = arbiterSigners.find((s) => s.address === arbiter)!
+      await commitAndReveal(aegis, signer, caseId, 60)
+      await time.increase(APPEAL_WINDOW + 1)
+      await aegis.finalize(caseId)
+
+      // Different second party (use the second arbiter signer as a
+      // throwaway party — they're not in the eligible pool, just a party).
+      const otherParty = arbiterSigners[1]
+      const CASE_KEY_3 = ethers.keccak256(ethers.toUtf8Bytes("test-case-3"))
+      await stageMockCase(
+        mock,
+        usdcToken,
+        CASE_KEY_3,
+        partyA.address,
+        otherParty.address,
+        usdc("500"),
+        usdc("25"),
+      )
+      // Different pair → cooldown doesn't apply → same arbiter eligible
+      // (no NotEnoughArbiters).
+      await aegis.openDispute(await mock.getAddress(), CASE_KEY_3)
+    })
+  })
+
+  // ============================================================
+  // D12 — only the loser of a full verdict can appeal. Compromise
+  // verdicts (1..99) are appealable by either party.
+  // ============================================================
+
+  describe("D12 full-winner exclusion on appeal", () => {
+    it("rejects appeal from a 100% winner; allows the 0% loser", async () => {
+      const ctx = await loadFixture(deployFixture)
+      const { aegis, mock, governance, partyA, partyB, usdcToken, arbiterSigners } = ctx
+      await registerAndStake(aegis, governance, arbiterSigners.slice(0, 6))
+      await stageMockCase(
+        mock,
+        usdcToken,
+        CASE_KEY,
+        partyA.address,
+        partyB.address,
+        usdc("1000"),
+        usdc("50"),
+      )
+      const { caseId, arbiter } = await openAndDraw(
+        ctx.aegis,
+        ctx.coordinator,
+        await mock.getAddress(),
+        CASE_KEY,
+      )
+      const signer = arbiterSigners.find((s) => s.address === arbiter)!
+      // 100% to partyA → partyA fully won.
+      await commitAndReveal(aegis, signer, caseId, 100)
+
+      // partyA cannot appeal (they fully won).
+      await expect(
+        aegis.connect(partyA).requestAppeal(caseId),
+      ).to.be.revertedWithCustomError(aegis, "FullWinnerCannotAppeal")
+
+      // partyB (the loser) can appeal.
+      await aegis.connect(partyB).requestAppeal(caseId)
+      const c = await aegis.getCase(caseId)
+      expect(c.appellant).to.equal(partyB.address)
+    })
+
+    it("rejects appeal from a 0% winner; allows the 100% loser", async () => {
+      const ctx = await loadFixture(deployFixture)
+      const { aegis, mock, governance, partyA, partyB, usdcToken, arbiterSigners } = ctx
+      await registerAndStake(aegis, governance, arbiterSigners.slice(0, 6))
+      await stageMockCase(
+        mock,
+        usdcToken,
+        CASE_KEY,
+        partyA.address,
+        partyB.address,
+        usdc("1000"),
+        usdc("50"),
+      )
+      const { caseId, arbiter } = await openAndDraw(
+        ctx.aegis,
+        ctx.coordinator,
+        await mock.getAddress(),
+        CASE_KEY,
+      )
+      const signer = arbiterSigners.find((s) => s.address === arbiter)!
+      // 0% to partyA → partyB fully won.
+      await commitAndReveal(aegis, signer, caseId, 0)
+
+      // partyB cannot appeal.
+      await expect(
+        aegis.connect(partyB).requestAppeal(caseId),
+      ).to.be.revertedWithCustomError(aegis, "FullWinnerCannotAppeal")
+
+      // partyA (the loser) can.
+      await aegis.connect(partyA).requestAppeal(caseId)
+    })
+
+    it("allows either party to appeal a compromise verdict", async () => {
+      const ctx = await loadFixture(deployFixture)
+      const { aegis, mock, governance, partyA, partyB, usdcToken, arbiterSigners } = ctx
+      await registerAndStake(aegis, governance, arbiterSigners.slice(0, 6))
+      await stageMockCase(
+        mock,
+        usdcToken,
+        CASE_KEY,
+        partyA.address,
+        partyB.address,
+        usdc("1000"),
+        usdc("50"),
+      )
+      const { caseId, arbiter } = await openAndDraw(
+        ctx.aegis,
+        ctx.coordinator,
+        await mock.getAddress(),
+        CASE_KEY,
+      )
+      const signer = arbiterSigners.find((s) => s.address === arbiter)!
+      await commitAndReveal(aegis, signer, caseId, 60)
+
+      // partyA can appeal (compromise — they wanted more than 60).
+      await aegis.connect(partyA).requestAppeal(caseId)
+      const c = await aegis.getCase(caseId)
+      expect(c.appellant).to.equal(partyA.address)
+    })
+  })
 })
