@@ -279,3 +279,162 @@ replacement" doesn't strictly hold.
 contains this; for the original-phase recuse, the new arbiter still
 must be honest enough to commit-reveal a sensible vote, and any
 overturn happens through the regular appeal flow with VRF.
+
+## L-01 — `_releaseLock` "snap to 0" can mask accounting drift
+
+**Location**: `Aegis.sol:_releaseLock` line 1106.
+
+```solidity
+lockedStake[arbiter] = cur > amount ? cur - amount : 0;
+```
+
+If a bug ever causes `_releaseLock` to be called twice for the same
+draw (or with the wrong `amount`), the second call clamps to 0 and
+silently corrupts accounting. Subsequent `unstake` calls would then
+be allowed for stake that's still bonded to active cases.
+
+**Recommendation**. Change to a strict assertion:
+```solidity
+require(cur >= amount, "lock underflow");
+lockedStake[arbiter] = cur - amount;
+```
+Aborts the tx on accounting drift, surfacing the bug immediately.
+
+## L-02 — Median-of-2 floor rounding favors lower party
+
+**Location**: `Aegis.sol:_medianOf2` line 1098.
+
+`floor((a + b) / 2)` for an odd sum rounds down by 0.5 percentage
+point. Per D6 this is the locked design choice, but worth a
+user-visible note in `docs/arbitration-redesign.md` so parties
+understand that an E3 partial reveal can shift the median by ±0.5pp
+relative to the arithmetic mean.
+
+**Recommendation**. Documentation only.
+
+## L-03 — `setPolicy` accepts extreme window values without sanity bounds
+
+**Location**: `Aegis.sol:_validatePolicy` line 423.
+
+The policy validator only rejects `commitWindow == 0`,
+`revealWindow == 0`, `appealWindow == 0`. A captured governance
+could `setPolicy({commitWindow: 1, revealWindow: 1, ...})` to make
+the system effectively unusable (arbiters can't act in 1-second
+windows). Or set windows to `type(uint64).max` to keep cases live
+for centuries.
+
+Mitigated by the timelock on `Governance.sol`, but defense in depth
+suggests bounds:
+- `commitWindow` and `revealWindow` between 1 hour and 30 days.
+- `appealWindow` between 1 day and 30 days.
+- `repeatArbiterCooldown` ≤ 5 years.
+
+**Recommendation**. Add range checks. ~10 lines in `_validatePolicy`.
+
+## L-04 — `Stalled` events emit `slashedTotal` as `stakeRequirement` regardless of actual slash
+
+**Location**: `Aegis.sol:_stallOriginal` lines 1046, 1051.
+
+```solidity
+emit Stalled(caseId, 0, p.stakeRequirement);
+```
+
+The third arg is documented as `slashedTotal`, but `_slashArbiter`
+caps the actual slash at the arbiter's available stake. If the
+arbiter has been partially slashed earlier (impossible under current
+flow, but possible if combined with future features), the event's
+declared "slashed" amount won't match what `treasuryAccrued`
+actually grew by.
+
+**Recommendation**. Have `_slashArbiter` return the actual slashed
+amount; pass it to the `Stalled` emit.
+
+## I-01 — Frontrunning `openDispute` is harmless
+
+`openDispute` is permissionless. A keeper might be racing other
+keepers to open the same dispute; the second tx reverts
+`CaseAlreadyLive` cleanly. No exploit.
+
+## I-02 — Fee-on-transfer fee tokens are correctly handled
+
+The balance-delta pattern (`balAfter - balBefore`) credits whatever
+amount actually arrived, not the amount the escrow `applyArbitration`
+intended to send. If the fee token charges 0.5% transfer tax, Aegis
+just distributes the post-tax amount. The arbiter and parties get
+slightly less; no loss to Aegis, no panic.
+
+## I-03 — Per-case appeal fees held in escrow's fee token
+
+If the fee token (e.g., USDC) blacklists Aegis's address mid-case,
+then:
+- Outgoing transfers (claim, party rebate) revert.
+- Locked appeal fees are stuck.
+
+This is a USDC compliance failure mode shared by every contract
+that holds USDC. Not Aegis-specific. Worth a sentence in trust
+assumptions.
+
+## Recommended mitigation order
+
+If you do nothing else before mainnet, do these:
+
+1. **H-02 force-cancel escape** — without this, a single VRF outage
+   permanently bricks affected cases. Add `forceCancelStuck` with a
+   30-day delay + governance role.
+2. **H-01 perArbiterFeeBps cap** — three-line patch in
+   `_validatePolicy`. Removes a class of governance-capture-induced
+   pay denial.
+3. **L-01 strict require in `_releaseLock`** — converts a silent
+   accounting bug into a loud one. One line.
+4. **M-03 hard cap on `_arbiterList.length`** — defensive against
+   future scaling-induced VRF gas-out.
+5. **L-03 policy bounds** — defense in depth; add the range checks.
+
+After those, schedule the external audit. M-01, M-02, M-04, L-02,
+L-04, and the I-* items can be addressed during the audit cycle or
+deferred.
+
+## What was NOT found
+
+For the record — areas examined and cleared:
+
+- **Reentrancy in `claim`, `stake`, `unstake`, `withdrawTreasury`**:
+  all use CEI + `nonReentrant`. ✓
+- **Integer overflow in fee math**: amounts × bps fit in uint256
+  with safe Solidity 0.8 checks. ✓
+- **uint16 truncation in `_medianOf2`**: sum ≤ 200, well within
+  uint16. revealVote enforces percentage ≤ 100. ✓
+- **Modulo bias in `_drawArbiter`**: seed is uint256, n is small;
+  bias is negligible. ✓
+- **Two simultaneous `commitVote` from same arbiter**: second
+  reverts `AlreadyCommitted`. ✓
+- **Two simultaneous `finalize`**: state-machine guards reject the
+  second. ✓
+- **D12 enforcement off-by-one**: `partyAPercentage == 100`
+  excludes partyA correctly; `== 0` excludes partyB. Compromise
+  verdicts (1..99) admit either. Tested. ✓
+- **D13 cooldown bypass via party order**: `_partyPairKey`
+  canonicalizes (a, b) → keccak(min, max). Symmetric. ✓
+- **`liveCaseFor` cleanup on stall**: not cleared on round-0 stall
+  (correct; case still live), cleared on round-1 default and
+  resolution. ✓
+- **`escrowCaseId` vs `aegisCaseId`** confusion: contract correctly
+  passes `c.escrowCaseId` to `applyArbitration` (fixed bug from
+  earlier review pass). Tested. ✓
+
+## Notes for the external auditor
+
+- Read `docs/arbitration-redesign.md` first — it's the spec the
+  contract was written from. Decisions D1–D16 are referenced
+  throughout.
+- `docs/ux-design.md` covers the de novo blindness property the
+  frontend enforces; the contract's role is to make sure phase
+  context isn't on-chain-derivable beyond what's strictly necessary
+  for state transitions.
+- All 26 contract tests in `blockchain/test/Aegis.test.ts` are the
+  intended-behavior spec. If a finding contradicts a test, please
+  flag.
+- This redesign replaced a 1637-line v0 contract with 1488 lines.
+  The v0 audit is in `docs/security-review.md` — most of its
+  findings don't apply (different attack surface) but the trust
+  assumptions still do.
