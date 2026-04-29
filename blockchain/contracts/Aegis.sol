@@ -102,19 +102,15 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
     // ============================================================
 
     struct Policy {
-        uint8 panelSize; // odd, 3..=7
-        uint64 voteWindow; // commit phase length, seconds
-        uint64 revealWindow; // reveal phase length, seconds
+        uint64 commitWindow; // commit phase length, seconds (D7)
+        uint64 revealWindow; // reveal phase length, seconds (D8)
         uint64 graceWindow; // grace before slashing on stall, seconds
-        uint256 stakeRequirement; // minimum stake to be eligible for panels
-        uint16 panelFeeBps; // share of fee paid to revealing panelists
-        address treasury; // recipient for non-panel share
-        // Appeals — see `requestAppeal` + `_finalizeAppeal`. All four
-        // settings are governance-tunable; sane defaults at deploy.
-        uint64 appealWindow; // seconds after AppealableResolved during which an appeal can be filed
-        uint8 appealPanelSize; // odd; typically larger than panelSize (e.g. 5 vs 3)
-        uint256 appealBondAmount; // ELCP bond the appellant posts on requestAppeal
-        uint16 appealOverturnTolerance; // verdict diff (in percentage points) above which original is overturned
+        uint64 appealWindow; // appeal-eligibility window post original-reveal (D9)
+        uint64 repeatArbiterCooldown; // seconds an arbiter is excluded from same-parties cases (D13)
+        uint256 stakeRequirement; // minimum stake to be eligible
+        uint16 appealFeeBps; // appeal fee in escrow's fee token, bps of disputed amount (D2)
+        uint16 perArbiterFeeBps; // per-arbiter share on appealed cases, bps (2.5% per D4)
+        address treasury; // recipient for slashed bonds + treasury portions
     }
 
     Policy public policy;
@@ -248,12 +244,14 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
     event StakeIncreased(address indexed arbiter, uint256 amount, uint256 newTotal);
     event StakeWithdrawn(address indexed arbiter, uint256 amount, uint256 newTotal);
     event PolicyUpdated(
-        uint8 panelSize,
-        uint64 voteWindow,
+        uint64 commitWindow,
         uint64 revealWindow,
         uint64 graceWindow,
+        uint64 appealWindow,
+        uint64 repeatArbiterCooldown,
         uint256 stakeRequirement,
-        uint16 panelFeeBps,
+        uint16 appealFeeBps,
+        uint16 perArbiterFeeBps,
         address treasury
     );
     event NewCasesPaused(bool paused);
@@ -422,19 +420,11 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
     }
 
     function _validatePolicy(Policy memory p) internal pure {
-        if (p.panelSize < 3 || p.panelSize > 7 || p.panelSize % 2 == 0) revert InvalidPolicy();
-        if (p.voteWindow == 0 || p.revealWindow == 0) revert InvalidPolicy();
-        if (p.panelFeeBps > BPS_DENOMINATOR) revert InvalidPolicy();
-        if (p.treasury == address(0)) revert InvalidPolicy();
-        // Appeals: appealPanelSize must be odd and at least equal to panelSize
-        // (typically larger). Tolerance 0..=100. Window > 0.
-        if (
-            p.appealPanelSize < p.panelSize ||
-            p.appealPanelSize > 11 ||
-            p.appealPanelSize % 2 == 0
-        ) revert InvalidPolicy();
+        if (p.commitWindow == 0 || p.revealWindow == 0) revert InvalidPolicy();
         if (p.appealWindow == 0) revert InvalidPolicy();
-        if (p.appealOverturnTolerance > 100) revert InvalidPolicy();
+        if (p.appealFeeBps > BPS_DENOMINATOR) revert InvalidPolicy();
+        if (p.perArbiterFeeBps > BPS_DENOMINATOR) revert InvalidPolicy();
+        if (p.treasury == address(0)) revert InvalidPolicy();
     }
 
     // ============================================================
@@ -486,12 +476,14 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
         _validatePolicy(p);
         policy = p;
         emit PolicyUpdated(
-            p.panelSize,
-            p.voteWindow,
+            p.commitWindow,
             p.revealWindow,
             p.graceWindow,
+            p.appealWindow,
+            p.repeatArbiterCooldown,
             p.stakeRequirement,
-            p.panelFeeBps,
+            p.appealFeeBps,
+            p.perArbiterFeeBps,
             p.treasury
         );
     }
