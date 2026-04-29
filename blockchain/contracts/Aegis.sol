@@ -942,7 +942,7 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
 
         // Apply verdict to escrow, capture fee.
         uint256 balBefore = IERC20(feeToken).balanceOf(address(this));
-        IArbitrableEscrow(c.escrow).applyArbitration(caseId, finalPercentage, finalDigest);
+        IArbitrableEscrow(c.escrow).applyArbitration(c.escrowCaseId, finalPercentage, finalDigest);
         uint256 balAfter = IERC20(feeToken).balanceOf(address(this));
         uint256 received = balAfter - balBefore;
         c.escrowFeeReceived = received;
@@ -1060,7 +1060,7 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
         address feeToken = c.feeToken;
 
         uint256 balBefore = IERC20(feeToken).balanceOf(address(this));
-        IArbitrableEscrow(c.escrow).applyArbitration(caseId, DEFAULT_PERCENTAGE, bytes32(0));
+        IArbitrableEscrow(c.escrow).applyArbitration(c.escrowCaseId, DEFAULT_PERCENTAGE, bytes32(0));
         uint256 balAfter = IERC20(feeToken).balanceOf(address(this));
         uint256 received = balAfter - balBefore;
         c.escrowFeeReceived = received;
@@ -1138,7 +1138,7 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
 
         // External call: apply verdict, escrow pays our fee.
         uint256 balBefore = IERC20(feeToken).balanceOf(address(this));
-        IArbitrableEscrow(c.escrow).applyArbitration(caseId, percentage, digest);
+        IArbitrableEscrow(c.escrow).applyArbitration(c.escrowCaseId, percentage, digest);
         uint256 balAfter = IERC20(feeToken).balanceOf(address(this));
         uint256 received = balAfter - balBefore;
         c.escrowFeeReceived = received;
