@@ -810,14 +810,20 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
             return;
         }
 
-        if (c.state == CaseState.Voting && c.originalRevealed) {
-            // Appeal phase: settle when both have revealed early, or
-            // when the reveal window has closed (partial / full fail).
-            bool bothRevealed = c.appealSlots[0].revealed && c.appealSlots[1].revealed;
-            if (!bothRevealed && block.timestamp < c.appealRevealDeadline) {
-                revert RevealWindowOpen();
+        if (c.state == CaseState.Voting) {
+            if (c.originalRevealed) {
+                // Appeal phase: settle when both reveal or window closes.
+                bool bothRevealed = c.appealSlots[0].revealed && c.appealSlots[1].revealed;
+                if (!bothRevealed && block.timestamp < c.appealRevealDeadline) {
+                    revert RevealWindowOpen();
+                }
+                _settleAppeal(c, caseId);
+                return;
             }
-            _settleAppeal(c, caseId);
+
+            // Original phase stall: arbiter failed to reveal in time.
+            if (block.timestamp < c.originalRevealDeadline) revert RevealWindowOpen();
+            _stallOriginal(c, caseId);
             return;
         }
 
@@ -829,7 +835,10 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
             revert CaseNotFound();
         }
 
-        revert NotImplemented(); // Phase 5: stall fallbacks
+        // AwaitingArbiter / AwaitingAppealPanel: VRF hasn't fulfilled.
+        // Operational issue, not a state-machine path. Governance
+        // remediation lives outside finalize.
+        revert CaseNotAwaitingPanel();
     }
 
     /// @dev Appeal happy / partial / full-fail path. Computes the
@@ -941,6 +950,76 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
         c.state = CaseState.Resolved;
 
         emit CaseResolved(caseId, finalPercentage, finalDigest);
+    }
+
+    /// @dev Original arbiter failed to reveal by the deadline.
+    /// Round 0 stall: slash the arbiter, request fresh VRF for a new
+    /// draw (excluding the failed one). Round 1 stall: apply 50/50
+    /// default verdict and transition to Defaulted (system can't
+    /// produce a verdict; deterministic fallback).
+    function _stallOriginal(Case storage c, bytes32 caseId) internal {
+        Policy memory p = policy;
+
+        _slashArbiter(c.originalArbiter, p.stakeRequirement, caseId);
+
+        if (c.stallRound == 0) {
+            c.stallRound = 1;
+            c.state = CaseState.AwaitingArbiter;
+            // Reset commit state for the redraw. Keep originalArbiter
+            // populated so _drawOriginal's redraw exclusion sees it.
+            c.originalCommitHash = bytes32(0);
+
+            VrfConfig memory cfg = vrfConfig;
+            uint256 requestId = IVRFCoordinator(vrfCoordinator).requestRandomWords(
+                cfg.keyHash,
+                cfg.subscriptionId,
+                cfg.requestConfirmations,
+                cfg.callbackGasLimit,
+                1
+            );
+            requestToCase[requestId] = caseId;
+
+            emit Stalled(caseId, 0, p.stakeRequirement);
+            return;
+        }
+
+        // Round 1 stall → 50/50 default verdict.
+        emit Stalled(caseId, 1, p.stakeRequirement);
+        _applyDefault(c, caseId);
+    }
+
+    /// @dev Apply DEFAULT_PERCENTAGE (50) to the escrow on a full
+    /// stall. Entire escrow fee rebates to parties 50/50, matching
+    /// the default verdict — no arbiter served, so the arbiter share
+    /// is zero. Treasury keeps nothing on this path.
+    function _applyDefault(Case storage c, bytes32 caseId) internal {
+        address feeToken = c.feeToken;
+
+        uint256 balBefore = IERC20(feeToken).balanceOf(address(this));
+        IArbitrableEscrow(c.escrow).applyArbitration(caseId, DEFAULT_PERCENTAGE, bytes32(0));
+        uint256 balAfter = IERC20(feeToken).balanceOf(address(this));
+        uint256 received = balAfter - balBefore;
+        c.escrowFeeReceived = received;
+
+        if (received > 0) {
+            uint256 partyAShare = received / 2;
+            uint256 partyBShare = received - partyAShare;
+            if (partyAShare > 0) {
+                claimable[c.partyA][feeToken] += partyAShare;
+                emit PartyRebated(caseId, c.partyA, feeToken, partyAShare);
+            }
+            if (partyBShare > 0) {
+                claimable[c.partyB][feeToken] += partyBShare;
+                emit PartyRebated(caseId, c.partyB, feeToken, partyBShare);
+            }
+            emit FeesAccrued(caseId, feeToken, received, 0, received, 0);
+            c.feesDistributed = true;
+        }
+
+        delete liveCaseFor[c.escrow][c.escrowCaseId];
+        c.state = CaseState.Defaulted;
+
+        emit CaseDefaultResolved(caseId, DEFAULT_PERCENTAGE);
     }
 
     /// @dev Median of 3 unsigned 16-bit values via three compare-swaps.
