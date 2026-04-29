@@ -50,6 +50,11 @@ export default async function CaseDetailPage({
         (p) => p.panelistAddress.toLowerCase() === viewer.toLowerCase(),
       )
     : false
+  // The signed-in wallet is currently filling an arbiter slot on this
+  // case (either original or one of the two appeal slots). Used to
+  // gate de novo UI sanitization — assigned arbiters don't see panel
+  // listings, appeal-context labels, or peer arbiter identities.
+  const isAssignedArbiter = isPanelist || isAppealPanelist
   const appealPhase: "commit" | "reveal" | "closed" =
     c.status === "appeal_open"
       ? "commit"
@@ -171,54 +176,59 @@ export default async function CaseDetailPage({
         </dl>
       </section>
 
-      <section className="card">
-        <h2 className="text-sm font-medium uppercase tracking-wide text-zinc-500">
-          Panel
-        </h2>
-        <ul className="mt-2 space-y-1 text-sm">
-          {panel.map((p) => {
-            const conflicts = conflictsByPanelist.get(p.panelistAddress.toLowerCase()) ?? []
-            return (
-              <li key={p.panelistAddress} className="flex flex-wrap items-center gap-3">
-                <span className="text-xs text-zinc-500">seat {p.seat}</span>
-                <Link
-                  href={`/arbiters/${p.panelistAddress}`}
-                  className="font-mono hover:underline"
-                >
-                  {p.panelistAddress}
-                </Link>
-                {p.committedAt && (
-                  <span className="badge bg-zinc-200 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">
-                    committed
-                  </span>
-                )}
-                {p.revealedAt && (
-                  <span className="badge bg-emerald-100 text-emerald-900 dark:bg-emerald-900/40 dark:text-emerald-200">
-                    revealed{p.partyAPercentage !== null && ` · ${p.partyAPercentage}/100`}
-                  </span>
-                )}
-                {conflicts.length > 0 && (
-                  <span
-                    className="badge bg-rose-100 text-rose-900 dark:bg-rose-900/40 dark:text-rose-200"
-                    title={
-                      "Declared conflict with " +
-                      conflicts
-                        .map(
-                          (c) =>
-                            `${c.partyAddress.slice(0, 8)}…${c.partyAddress.slice(-4)}` +
-                            (c.reason ? ` (${c.reason})` : ""),
-                        )
-                        .join(", ")
-                    }
+      {/* Panel listing is hidden from assigned arbiters per de novo —
+          they shouldn't see peer arbiter identities or phase context.
+          Parties and visitors see it as today. */}
+      {!isAssignedArbiter && (
+        <section className="card">
+          <h2 className="text-sm font-medium uppercase tracking-wide text-zinc-500">
+            Panel
+          </h2>
+          <ul className="mt-2 space-y-1 text-sm">
+            {panel.map((p) => {
+              const conflicts = conflictsByPanelist.get(p.panelistAddress.toLowerCase()) ?? []
+              return (
+                <li key={p.panelistAddress} className="flex flex-wrap items-center gap-3">
+                  <span className="text-xs text-zinc-500">seat {p.seat}</span>
+                  <Link
+                    href={`/arbiters/${p.panelistAddress}`}
+                    className="font-mono hover:underline"
                   >
-                    declared conflict
-                  </span>
-                )}
-              </li>
-            )
-          })}
-        </ul>
-      </section>
+                    {p.panelistAddress}
+                  </Link>
+                  {p.committedAt && (
+                    <span className="badge bg-zinc-200 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">
+                      committed
+                    </span>
+                  )}
+                  {p.revealedAt && (
+                    <span className="badge bg-emerald-100 text-emerald-900 dark:bg-emerald-900/40 dark:text-emerald-200">
+                      revealed{p.partyAPercentage !== null && ` · ${p.partyAPercentage}/100`}
+                    </span>
+                  )}
+                  {conflicts.length > 0 && (
+                    <span
+                      className="badge bg-rose-100 text-rose-900 dark:bg-rose-900/40 dark:text-rose-200"
+                      title={
+                        "Declared conflict with " +
+                        conflicts
+                          .map(
+                            (c) =>
+                              `${c.partyAddress.slice(0, 8)}…${c.partyAddress.slice(-4)}` +
+                              (c.reason ? ` (${c.reason})` : ""),
+                          )
+                          .join(", ")
+                      }
+                    >
+                      declared conflict
+                    </span>
+                  )}
+                </li>
+              )
+            })}
+          </ul>
+        </section>
+      )}
 
       {isParty && (
         <section className="card">
@@ -330,29 +340,36 @@ export default async function CaseDetailPage({
         </section>
       )}
 
-      {isPanelist && (
+      {/* Single unified "Your vote" section per de novo — same shape
+          regardless of whether the arbiter is filling the original
+          slot or one of the two appeal slots. The contract routes by
+          msg.sender; the form looks identical to the arbiter. */}
+      {isAssignedArbiter && (
         <section className="card">
           <h2 className="text-sm font-medium uppercase tracking-wide text-zinc-500">
-            Your vote ({phase} phase)
+            Your vote
           </h2>
           <div className="mt-3">
             <CommitRevealForm
               aegisAddress={c.aegisAddress as `0x${string}`}
               caseId={c.caseId as `0x${string}`}
-              phase={phase}
+              phase={isPanelist ? phase : appealPhase}
             />
           </div>
         </section>
       )}
 
-      {appealPanel.length > 0 && (
+      {/* Appeal panel listing is hidden from assigned arbiters per de
+          novo — they shouldn't see peer identities or phase context.
+          Visible to parties and visitors as today. */}
+      {!isAssignedArbiter && appealPanel.length > 0 && (
         <section className="card">
           <h2 className="text-sm font-medium uppercase tracking-wide text-zinc-500">
             Appeal panel
           </h2>
           <p className="mt-1 text-xs text-zinc-500">
-            Larger second-instance panel (size {appealPanel.length}). Drawn
-            via VRF excluding the original panel.
+            Two additional arbiters drawn via VRF excluding the original.
+            Final verdict is the median of all three.
           </p>
           <ul className="mt-2 space-y-1 text-sm">
             {appealPanel.map((p) => (
@@ -377,21 +394,6 @@ export default async function CaseDetailPage({
               </li>
             ))}
           </ul>
-        </section>
-      )}
-
-      {isAppealPanelist && (
-        <section className="card border-amber-300 dark:border-amber-700">
-          <h2 className="text-sm font-medium uppercase tracking-wide text-zinc-500">
-            Your appeal vote ({appealPhase} phase)
-          </h2>
-          <div className="mt-3">
-            <CommitRevealForm
-              aegisAddress={c.aegisAddress as `0x${string}`}
-              caseId={c.caseId as `0x${string}`}
-              phase={appealPhase}
-            />
-          </div>
         </section>
       )}
 
