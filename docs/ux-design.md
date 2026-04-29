@@ -188,3 +188,171 @@ The UI must contextualize correctly: when Alice opens case #71's
 workspace, she sees the arbiter UX (de novo sanitized). When she
 opens case #42's workspace, she sees the party UX. The route is
 the same; the rendering branches on role detection.
+
+## Screens
+
+### Home (`/`)
+
+Landing page. Already implemented; designer should refresh.
+
+**Above the fold**:
+- H1 "Aegis" + 2-line description: "Eclipse-DAO arbitration. Vetted,
+  ELCP-staked arbiters resolve disputes for any escrow protocol that
+  implements `IArbitrableEscrow`."
+- No hero image, no marketing flourish. This is a court, not a SaaS.
+
+**Below**:
+- 2×2 grid of `.card` tiles, each linking to a top-level area:
+  - **Cases ledger** — public list of opened, in-flight, and resolved cases
+  - **Arbiters** — registered roster, ELCP stake, on-chain case counts
+  - **Governance bridge** — calldata builder for DAO proposals
+  - **Plug in your escrow** — static info card pointing at integration docs
+
+**No personalization.** Even if signed in, the home page doesn't
+default to "your queue." That would couple a public landing to a
+wallet state in a confusing way. If a user wants their queue, they
+click "My queue" in the nav.
+
+**Footer**: GitHub link, security review, integration docs. Tiny,
+muted, single line.
+
+### Cases ledger (`/cases`)
+
+The public docket. Lists all cases on the indexed Aegis instance.
+
+**Header**:
+- H1 "Cases"
+- Filter chips below: All · In flight · Resolved · Defaulted (or
+  similar). Count badges next to each.
+- Optional: Search by caseId / party address.
+
+**Table** (or feed of rows; a table works fine here):
+- Columns: Case ID (mono, truncated) · Parties (mono, both addresses
+  or ENS if available, truncated) · Amount (USDC formatted) · Status
+  (badge) · Opened (relative time)
+- Click row → case workspace.
+- Status badge color: amber for in-flight, sky for committed but not
+  resolved, emerald for resolved, red for defaulted/stalled.
+
+**Pagination**: simple "load more" or numbered. The public ledger
+will grow; don't try to render 10,000 rows at once.
+
+**Empty state**: "No cases on this Aegis instance yet" + link to
+the integration doc. Avoid stock illustrations; just text.
+
+**Per-case privacy**: D13 soft anonymity — the public row should
+NOT show assigned arbiter addresses for in-flight cases. After
+resolution, arbiter addresses are visible (or governance-config
+to remain hidden). Designer to confirm with PM whether even
+post-resolution arbiter identity is suppressed.
+
+### Case workspace (`/cases/[id]`)
+
+The most important and complex screen. Renders dramatically
+differently for the three viewer types: **public visitor**,
+**party**, **arbiter (de novo)**.
+
+#### Shared shell (all viewers)
+
+- Breadcrumb: Cases · #abcdef… (truncated case ID)
+- H1: "Case #abcdef…" with a copy-button next to the full ID.
+- Subtitle: parties + amount + escrow source. E.g.,
+  "Alice ↔ Bob · 1,000 USDC · Vaultra escrow".
+- Status badge in the top right.
+
+The shell is the same. The body splits:
+
+#### Party view
+
+The party knows everything. Render the full case context.
+
+**Sections** (top to bottom, vertical stack):
+
+1. **Status panel** — current state, deadline countdown(s), what
+   action the user can take. E.g., during the appeal window, this
+   panel surfaces a "Request appeal" button (gated by D12 — full
+   winners can't appeal; gray it out with an inline explanation).
+
+2. **Briefs** — both parties' briefs, side-by-side on desktop or
+   stacked on mobile. Editable for the viewer's own brief while
+   the case is in `Voting` (i.e., before the arbiter reveals);
+   read-only after. Encrypted briefs render through
+   `encrypted-brief-viewer.tsx` — a "decrypt" button if the viewer
+   has a key registered, plain text view otherwise.
+
+3. **Evidence panel** — file attachments, off-chain references.
+   Existing component `evidence-panel.tsx` covers this.
+
+4. **Verdict & timeline** — once the original arbiter reveals,
+   show the verdict prominently (e.g., "Verdict: 60% to you, 40%
+   to Bob"). Below it, a chronological timeline of state
+   transitions: "Dispute opened → Arbiter drawn → Vote committed
+   → Vote revealed → Appeal window: 3d 14h remaining". Use the
+   existing `case-timeline.tsx`.
+
+5. **Appeal action** (if appeal window open and viewer is eligible
+   per D12). Existing component `appeal-button.tsx` — show the
+   appeal fee in the escrow's fee token (e.g., "2.5% of disputed
+   amount = 25 USDC"). Two-step UX: "Request appeal" button →
+   confirmation modal showing the fee + an explanation that this
+   triggers a fresh 2-arbiter panel.
+
+6. **Fee distribution** (post-resolution) — collapsible card
+   showing arbiter pay, party rebates per D1(c), claim button if
+   the viewer has anything to claim.
+
+#### Arbiter view (DE NOVO — critical)
+
+The arbiter is here to do their job. They see exactly what the
+original arbiter would see for any case, regardless of whether
+they were drawn for the original or an appeal slot.
+
+**Visible**:
+- Briefs from both parties (encrypted; arbiter must have an
+  encryption key registered to decrypt — see Arbiter profile)
+- Evidence
+- Their own commit/reveal status
+- The deadline they need to act by (either commit deadline or
+  reveal deadline, whichever is current)
+- The disputed amount
+- Their fee on resolution
+
+**Not visible**:
+- Whether this case is original or appeal phase
+- Any prior verdict (the original arbiter's reveal, when they
+  themselves are an appeal arbiter)
+- The other appeal arbiter's identity or vote
+- The case's full timeline / event history
+- The state badge (or it shows a generic "Voting" with no phase
+  distinction)
+
+**Layout**:
+- The same shell + status panel up top, but the status panel only
+  surfaces "Submit your commit" or "Reveal your vote" with a
+  countdown. No "this is an appeal" copy. No "the original
+  arbiter ruled X, your role is to confirm or overturn."
+- Briefs are just briefs. Same component as party view, but the
+  arbiter sees both.
+- Commit/reveal form is the existing `commit-reveal-form.tsx`,
+  reworked to drop any "appeal" labels (D14 keeps the word
+  "arbiter" everywhere; never "panelist" or "judge").
+- Recuse button is available before they've committed. Wire it to
+  the contract's `recuse(caseId)`.
+
+**The hard part for the designer**: making sure the page
+"feels normal" for an appeal arbiter. They should not get the
+sense that anything is missing. Test by mocking up both an
+original-phase and appeal-phase case for the same arbiter — the
+two should be indistinguishable to them.
+
+#### Public visitor view
+
+Same shell. Body shows:
+- Briefs only after resolution (D13 / privacy — until the case is
+  closed, the briefs aren't public).
+- Verdict, timeline, fee distribution post-resolution.
+- During flight: just status + parties + amount. No briefs, no
+  arbiter identities.
+
+This is the "public docket" view that lets observers see what the
+court has done historically without leaking in-flight details.
