@@ -234,6 +234,111 @@ directly from the contract via an explorer before committing. Defense:
 The blinding is therefore "soft" by cryptographic standards but
 "hard" by economic standards. Acceptable.
 
+## Edge cases
+
+### E1. Original arbiter never commits
+
+```mermaid
+flowchart LR
+    A[Arbiter assigned] --> B{Commit by deadline?}
+    B -->|No, round 0| C[Slash bond<br/>VRF re-draw new arbiter]
+    B -->|No, round 1| D[Apply 50/50 default<br/>slash second arbiter too]
+```
+
+Same two-round pattern as the existing contract's `_stallAndRedraw` —
+one redraw, then default verdict. Default percentage = 50.
+
+### E2. Original arbiter commits but never reveals
+
+Treated identically to E1 — slash, redraw, then default. The committed
+hash is meaningless without the reveal; we cannot extract their vote.
+
+### E3. One appeal arbiter doesn't reveal
+
+The 3-quorum becomes a 2-quorum: original vote + 1 revealed appeal
+vote. Median of 2 = arithmetic mean.
+
+```mermaid
+flowchart LR
+    A[Both appeal arbiters committed] --> B{Both reveal?}
+    B -->|Yes| C[median 3 votes]
+    B -->|One reveals| D[median 2 votes<br/>orig + revealed appeal]
+    B -->|None reveal| E[fall back to original verdict]
+    D --> F[Slash non-revealer<br/>distribute pot to revealers]
+    E --> G[Slash both<br/>refund appellant]
+```
+
+**Pot distribution when only one appeal arbiter reveals**:
+`original = 2.5%`, `revealing appeal arbiter = 2.5%`, `slashed bond +
+unspent 2.5% appeal-arbiter slot = treasury or appellant refund`.
+
+### E4. Both appeal arbiters fail to reveal
+
+Original verdict was effectively never overturned. The verdict that
+goes back to the escrow is the original.
+
+- Both appeal arbiters lose their bonds (treasury).
+- Appellant is **refunded their 2.5% appeal fee** — the system
+  failed them, they shouldn't pay for unpaid work.
+- Original arbiter is paid the no-appeal rate (Option A or B above).
+
+This is the one place the appeal fee is reliably refunded regardless
+of which "always consumed / refund / proportional" rule we pick for
+question 2.
+
+### E5. VRF fails to fulfill
+
+Same as today: case stuck in `AwaitingArbiter` or
+`AwaitingAppealPanel`. The `/admin` page surfaces it as "VRF stuck"
+after 1 hour. Manual remediation: governance can call a re-request
+function or top up the LINK subscription.
+
+No contract changes from current behavior.
+
+### E6. Arbiter tries to unstake mid-case
+
+`lockedStake[arbiter]` already prevents this in the current contract.
+Single-arbiter cases lock exactly one `stakeRequirement` per case.
+Appeal cases lock one additional bond per new arbiter on top.
+
+### E7. Appellant is not a party to the dispute
+
+`requestAppeal` reverts: only `partyA` or `partyB` can call it (same
+as current contract).
+
+### E8. Original arbiter is drawn again as an appeal arbiter
+
+VRF draw must exclude `case.originalArbiter` from the eligible set.
+The 3-quorum is supposed to be `original + 2 distinct new`. Drawing
+the original twice would collapse the quorum to 2 effective voters.
+
+### E9. Double-finalize / replayed `applyArbitration`
+
+`finalize` checks the case state machine and reverts if not in a
+finalizable state (same as current). The escrow's `applyArbitration`
+is idempotent on the escrow side via `liveCaseFor` mapping.
+
+### E10. Median is a tie / non-integer
+
+Votes are `uint16` percentages 0–100. With 3 votes, the median is
+always the middle value — a single integer, no ties. With 2 votes
+(E3 fallback), use floor((a+b)/2) for determinism.
+
+### Edge case summary
+
+| # | Scenario | Disposition |
+|---|---|---|
+| E1 | Original no-commit | Slash, redraw round 0; default round 1 |
+| E2 | Original no-reveal | Same as E1 |
+| E3 | 1/2 appeal reveal | Median of 2 (orig + reveal); slash absent |
+| E4 | 0/2 appeal reveal | Original verdict applies; refund appellant; slash both |
+| E5 | VRF stuck | Same as today; manual remediation |
+| E6 | Mid-case unstake | Blocked by `lockedStake` (no change) |
+| E7 | Non-party appeal | Reverts (no change) |
+| E8 | Original re-drawn for appeal | VRF excludes original arbiter |
+| E9 | Double-finalize | State guard reverts (no change) |
+| E10 | Tie median | Deterministic floor((a+b)/2) for 2-vote fallback |
+
 ## Open questions still on the table
 
 1. **No-appeal payout to original arbiter.** Option A (2.5% +
