@@ -108,7 +108,7 @@ export default async function CaseDetailPage({
         </Link>
         <div className="mt-2 flex flex-wrap items-center gap-3">
           <h1 className="text-2xl font-semibold tracking-tight">Case</h1>
-          <CaseStatusBadge status={c.status} />
+          <CaseStatusBadge status={c.status} forArbiter={isAssignedArbiter} />
           <span className="font-mono text-xs text-zinc-500">{c.caseId}</span>
         </div>
       </div>
@@ -441,19 +441,25 @@ export default async function CaseDetailPage({
         )
       })()}
 
-      <section className="card">
-        <h2 className="text-sm font-medium uppercase tracking-wide text-zinc-500">
-          Timeline
-        </h2>
-        <p className="mt-1 text-xs text-zinc-500">
-          Full chronological record. Vote details and brief / evidence
-          authorship details only appear after the case resolves
-          publicly.
-        </p>
-        <div className="mt-4">
-          <CaseTimeline events={timeline} />
-        </div>
-      </section>
+      {/* Timeline is hidden from assigned arbiters per de novo —
+          chronological event records leak phase context (e.g.
+          AppealRequested or the timestamp of the original arbiter's
+          reveal). Parties and visitors see it as today. */}
+      {!isAssignedArbiter && (
+        <section className="card">
+          <h2 className="text-sm font-medium uppercase tracking-wide text-zinc-500">
+            Timeline
+          </h2>
+          <p className="mt-1 text-xs text-zinc-500">
+            Full chronological record. Vote details and brief / evidence
+            authorship details only appear after the case resolves
+            publicly.
+          </p>
+          <div className="mt-4">
+            <CaseTimeline events={timeline} />
+          </div>
+        </section>
+      )}
 
       {/* Sticky red banner for arbiters who've committed but haven't
           acknowledged saving their recovery file. Self-gates on

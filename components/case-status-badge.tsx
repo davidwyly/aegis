@@ -33,8 +33,36 @@ const label: Record<string, string> = {
   stalled: "Stalled",
 }
 
-export function CaseStatusBadge({ status }: { status: string }) {
-  const cls = palette[status] ?? palette.open
-  const text = label[status] ?? status
+/**
+ * Sanitized label/palette mapping for arbiter-facing renders. Per
+ * de novo, an assigned arbiter must not see whether a case is in
+ * its original or appeal phase. Appeal-distinct states are
+ * collapsed onto their original-phase equivalents:
+ *
+ *   appeal_awaiting_panel → awaiting_panel
+ *   appeal_open           → open
+ *   appeal_revealing      → revealing
+ *
+ * Other states (appealable_resolved, resolved, default_resolved,
+ * stalled) are shown as-is — they're either out of the arbiter's
+ * concern (case already settled) or party-facing.
+ */
+const sanitizeForArbiter: Record<string, string> = {
+  appeal_awaiting_panel: "awaiting_panel",
+  appeal_open: "open",
+  appeal_revealing: "revealing",
+}
+
+export function CaseStatusBadge({
+  status,
+  forArbiter = false,
+}: {
+  status: string
+  /** Render a phase-collapsed version safe for assigned arbiters. */
+  forArbiter?: boolean
+}) {
+  const effective = forArbiter ? (sanitizeForArbiter[status] ?? status) : status
+  const cls = palette[effective] ?? palette.open
+  const text = label[effective] ?? effective
   return <span className={`badge ${cls}`}>{text}</span>
 }
