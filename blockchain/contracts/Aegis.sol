@@ -373,6 +373,7 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
     error CaseNotAwaitingPanel();
     error CaseNotInVotingState();
     error NotAssignedArbiter();
+    error FullWinnerCannotAppeal();
     error NotImplemented();
 
     // ============================================================
@@ -809,8 +810,59 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
         emit CaseResolved(caseId, percentage, digest);
     }
 
-    function requestAppeal(bytes32 /*caseId*/) external nonReentrant {
-        revert NotImplemented();
+    /// @notice File an appeal of the original arbiter's verdict.
+    ///
+    /// Eligibility rules (D12): only the loser of a full verdict can
+    /// appeal. On a compromise verdict (percentage in [1, 99]), either
+    /// party can appeal — they didn't get full satisfaction. On a full
+    /// verdict (0 or 100), only the losing party can appeal.
+    ///
+    /// The appellant pays an appeal fee of `policy.appealFeeBps` of
+    /// the disputed amount, denominated in the escrow's fee token
+    /// (not ELCP — bonds are out under the new design). The fee is
+    /// held in this contract until the appeal resolves; on partial-
+    /// reveal failure paths it may be refunded.
+    function requestAppeal(bytes32 caseId) external nonReentrant {
+        Case storage c = _cases[caseId];
+        if (c.state != CaseState.AppealableResolved) revert CaseNotAppealable();
+        if (block.timestamp >= c.appealDeadline) revert AppealWindowClosed();
+        if (msg.sender != c.partyA && msg.sender != c.partyB) revert AppealantNotParty();
+        if (c.appellant != address(0)) revert AppealAlreadyExists();
+
+        // D12: full winners cannot appeal.
+        if (c.originalPercentage == 100 && msg.sender == c.partyA) revert FullWinnerCannotAppeal();
+        if (c.originalPercentage == 0 && msg.sender == c.partyB) revert FullWinnerCannotAppeal();
+
+        // Fail fast if we can't seat 2 appeal arbiters excluding the original.
+        address[] memory exclude = new address[](1);
+        exclude[0] = c.originalArbiter;
+        if (_eligibleArbiterCount(c.partyA, c.partyB, exclude) < 2) {
+            revert NotEnoughArbiters();
+        }
+
+        // Pull the appeal fee in the escrow's fee token. Held by Aegis
+        // until distribution at appeal-finalize time.
+        Policy memory p = policy;
+        uint256 feeAmount = (c.amount * p.appealFeeBps) / BPS_DENOMINATOR;
+        if (feeAmount > 0) {
+            IERC20(c.feeToken).safeTransferFrom(msg.sender, address(this), feeAmount);
+        }
+
+        c.appellant = msg.sender;
+        c.appealFeeAmount = feeAmount;
+        c.state = CaseState.AwaitingAppealPanel;
+
+        VrfConfig memory cfg = vrfConfig;
+        uint256 requestId = IVRFCoordinator(vrfCoordinator).requestRandomWords(
+            cfg.keyHash,
+            cfg.subscriptionId,
+            cfg.requestConfirmations,
+            cfg.callbackGasLimit,
+            1
+        );
+        requestToCase[requestId] = caseId;
+
+        emit AppealRequested(caseId, msg.sender, feeAmount, c.feeToken, requestId);
     }
 
     // ============================================================
