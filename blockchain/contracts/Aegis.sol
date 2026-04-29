@@ -578,6 +578,124 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
     }
 
     // ============================================================
+    // Internal: arbiter sortition + eligibility
+    //
+    // Eligibility = active + sufficient free stake + not a party +
+    // not in the per-case exclude list + outside the D13 90-day
+    // cooldown for the (partyA, partyB) pair.
+    //
+    // The cooldown applies symmetrically (canonical-ordered key): if
+    // arbiter X arbitrated a case between (Alice, Bob) less than 90
+    // days ago, X is ineligible for any new (Alice, Bob) or
+    // (Bob, Alice) case. The exclusion does NOT extend to other
+    // pairs, e.g. (Alice, Charlie).
+    // ============================================================
+
+    function _isEligible(
+        address candidate,
+        address partyA,
+        address partyB,
+        uint256 stakeRequirement,
+        address[] memory exclude,
+        bytes32 pairKey,
+        uint64 cooldownStart
+    ) internal view returns (bool) {
+        if (candidate == partyA || candidate == partyB) return false;
+        Arbiter storage a = arbiters[candidate];
+        if (!a.active) return false;
+        uint96 free = a.stakedAmount > lockedStake[candidate]
+            ? a.stakedAmount - lockedStake[candidate]
+            : 0;
+        if (free < stakeRequirement) return false;
+        if (_contains(exclude, candidate)) return false;
+        if (lastArbitratedAt[pairKey][candidate] > cooldownStart) return false;
+        return true;
+    }
+
+    function _contains(address[] memory arr, address target) internal pure returns (bool) {
+        for (uint256 i = 0; i < arr.length; ++i) {
+            if (arr[i] == target) return true;
+        }
+        return false;
+    }
+
+    /// @notice Count eligible arbiters. Used by openDispute /
+    /// requestAppeal to fail-fast before paying VRF gas.
+    function _eligibleArbiterCount(
+        address partyA,
+        address partyB,
+        address[] memory exclude
+    ) internal view returns (uint256 n) {
+        Policy memory p = policy;
+        bytes32 pairKey = _partyPairKey(partyA, partyB);
+        uint64 cooldownStart = block.timestamp > p.repeatArbiterCooldown
+            ? uint64(block.timestamp - p.repeatArbiterCooldown)
+            : 0;
+        uint256 listLen = _arbiterList.length;
+        for (uint256 i = 0; i < listLen; ++i) {
+            if (_isEligible(
+                _arbiterList[i], partyA, partyB,
+                p.stakeRequirement, exclude, pairKey, cooldownStart
+            )) {
+                ++n;
+            }
+        }
+    }
+
+    /// @notice Draw a single arbiter pseudorandomly from the eligible
+    /// pool using a caller-supplied seed (typically a VRF word).
+    /// Reverts `NotEnoughArbiters` if the pool is empty after
+    /// applying the exclude list and the cooldown.
+    function _drawArbiter(
+        uint256 seed,
+        address partyA,
+        address partyB,
+        address[] memory exclude
+    ) internal view returns (address) {
+        Policy memory p = policy;
+        bytes32 pairKey = _partyPairKey(partyA, partyB);
+        uint64 cooldownStart = block.timestamp > p.repeatArbiterCooldown
+            ? uint64(block.timestamp - p.repeatArbiterCooldown)
+            : 0;
+        uint256 listLen = _arbiterList.length;
+        address[] memory eligible = new address[](listLen);
+        uint256 n = 0;
+        for (uint256 i = 0; i < listLen; ++i) {
+            address candidate = _arbiterList[i];
+            if (_isEligible(
+                candidate, partyA, partyB,
+                p.stakeRequirement, exclude, pairKey, cooldownStart
+            )) {
+                eligible[n++] = candidate;
+            }
+        }
+        if (n == 0) revert NotEnoughArbiters();
+        return eligible[seed % n];
+    }
+
+    /// @notice Draw two distinct arbiters for the appeal phase,
+    /// excluding the original arbiter. The second draw uses a derived
+    /// seed (keccak of the original seed + first draw) so we only
+    /// need a single VRF word per appeal.
+    function _drawTwoArbiters(
+        uint256 seed,
+        address partyA,
+        address partyB,
+        address originalArbiter
+    ) internal view returns (address first, address second) {
+        address[] memory exclude1 = new address[](1);
+        exclude1[0] = originalArbiter;
+        first = _drawArbiter(seed, partyA, partyB, exclude1);
+
+        address[] memory exclude2 = new address[](2);
+        exclude2[0] = originalArbiter;
+        exclude2[1] = first;
+
+        uint256 seed2 = uint256(keccak256(abi.encode(seed, first)));
+        second = _drawArbiter(seed2, partyA, partyB, exclude2);
+    }
+
+    // ============================================================
     // Pull-claim arbiter fees
     // ============================================================
 
