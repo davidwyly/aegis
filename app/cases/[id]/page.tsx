@@ -107,10 +107,20 @@ export default async function CaseDetailPage({
           ← all cases
         </Link>
         <div className="mt-2 flex flex-wrap items-center gap-3">
-          <h1 className="text-2xl font-semibold tracking-tight">Case</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">
+            {isAssignedArbiter ? "Case at arbitration" : "Case"}
+          </h1>
           <CaseStatusBadge status={c.status} forArbiter={isAssignedArbiter} />
           <span className="font-mono text-xs text-zinc-500">{c.caseId}</span>
         </div>
+        {isAssignedArbiter && (
+          <p className="mt-3 max-w-2xl text-sm text-zinc-600 dark:text-zinc-400">
+            You have been randomly selected to arbitrate this case. Your
+            identity is hidden — the parties and the DAO cannot see you. Read
+            the briefs and evidence carefully, then commit your verdict before
+            the deadline.
+          </p>
+        )}
       </div>
 
       <section className="card">
