@@ -63,14 +63,14 @@ The contract is correct only if these hold:
 | C-01 | — | (none found in this pass) |
 | H-01 | H | Governance can lock arbiter pay by setting `perArbiterFeeBps` above pot share — **FIXED in `59f0c1e`** |
 | H-02 | H | VRF-stuck cases have no on-chain remediation path — **FIXED in `390e64a`** |
-| M-01 | M | `_settleAppeal` pays arbiters first-come-first-served; a low-fee escrow may starve slot B |
-| M-02 | M | `applyArbitration` is called between balance reads; balance-delta correct but escrow can re-enter sibling functions |
+| M-01 | M | `_settleAppeal` pays arbiters first-come-first-served; a low-fee escrow may starve slot B — **FIXED (this round)** |
+| M-02 | M | `applyArbitration` is called between balance reads; balance-delta correct but escrow can re-enter sibling functions — **FIXED (this round)** |
 | M-03 | M | `_arbiterList` iteration cost is O(N) per draw; gas budget concern past ~500 arbiters — **FIXED in `59f0c1e`** |
-| M-04 | M | `recuse()` uses `block.prevrandao` for replacement draw; manipulable by block proposers |
+| M-04 | M | `recuse()` uses `block.prevrandao` for replacement draw; manipulable by block proposers — **DOCUMENTED (this round)** |
 | L-01 | L | `_releaseLock` defensive "snap to 0" can mask accounting drift — **FIXED in `59f0c1e`** |
-| L-02 | L | Median-of-2 floor rounding favors lower party (D6 by design but worth user-visible note) |
+| L-02 | L | Median-of-2 floor rounding favors lower party (D6 by design but worth user-visible note) — **DOCUMENTED (this round)** |
 | L-03 | L | `setPolicy` accepts `commitWindow` / `revealWindow` extreme values without sanity bounds — **FIXED in `59f0c1e`** |
-| L-04 | L | Stalled events emit `slashedTotal` as `stakeRequirement` regardless of actual slash |
+| L-04 | L | Stalled events emit `slashedTotal` as `stakeRequirement` regardless of actual slash — **FIXED (this round)** |
 | I-01 | I | Frontrunning `openDispute` is harmless but worth documenting |
 | I-02 | I | Fee-on-transfer fee tokens are correctly handled by balance-delta |
 | I-03 | I | Per-case appeal fee held in escrow's fee token; if token blacklists Aegis post-deposit, refund path becomes brittle |
@@ -400,21 +400,20 @@ deferred.
 
 ## Status snapshot
 
-| Severity | Count | Open | Fixed |
-|---|---|---|---|
-| Critical | 0 | 0 | — |
-| High | 2 | 0 | 2 |
-| Medium | 4 | 3 | 1 |
-| Low | 4 | 2 | 2 |
-| Info | 3 | 3 | — |
+| Severity | Count | Open | Fixed | Documented |
+|---|---|---|---|---|
+| Critical | 0 | 0 | — | — |
+| High | 2 | 0 | 2 | — |
+| Medium | 4 | 0 | 3 | 1 |
+| Low | 4 | 0 | 3 | 1 |
+| Info | 3 | 3 | — | — |
+
+All 8 actionable findings (Highs, Mediums, Lows) are either fixed
+in code or documented inline in `docs/arbitration-redesign.md`.
+The 3 informational items are context, not bugs.
 
 The contract is in audit-ready shape for the redesigned single-
-arbiter + appeal-of-3 model. The 5 remaining open findings are
-either operational corners under non-default policies (M-01),
-defense-in-depth on a re-entrancy pattern that has no concrete
-exploit (M-02), a documentation note about randomness assumption
-(M-04), a documentation note about rounding (L-02), or a cosmetic
-event-payload fix (L-04).
+arbiter + appeal-of-3 model.
 
 ## What was NOT found
 

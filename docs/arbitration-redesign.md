@@ -131,6 +131,28 @@ the fee; refund logic can be added later if appellants complain.
   The economic disincentive carries the integrity, not on-chain
   blinding.
 
+### Notes on randomness
+
+- **Original-phase draws and appeal-panel draws use Chainlink VRF**
+  for unbiased pseudorandom selection.
+- **`recuse()` synchronous redraw uses `block.prevrandao`** to avoid
+  paying VRF gas for what should be a quick replacement (M-04 audit
+  finding). A block proposer who is also a registered arbiter could
+  in principle bias their replacement draw by selectively including
+  the recuse transaction. The 2-of-3 quorum on appeal contains this
+  risk: even a colluding proposer-arbiter cannot swing a verdict
+  alone, since the appeal flow re-uses VRF for the appeal panel.
+  Acceptable for v1; revisit if the proposer-arbiter overlap is ever
+  observed in practice.
+
+### Notes on rounding
+
+- **Median of 2** (E3 partial reveal): `floor((a + b) / 2)` per D6.
+  When the sum is odd, the result rounds toward partyB by 0.5
+  percentage points relative to the arithmetic mean. Negligible in
+  practice but documented for reasoning about edge-case payouts
+  (L-02 audit finding).
+
 ## Sequence diagrams
 
 ### Happy path — no appeal

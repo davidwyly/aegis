@@ -809,14 +809,14 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
 
         address recuser = msg.sender;
         Policy memory p = policy;
-        uint96 stake = uint96(p.stakeRequirement);
+        uint96 stakeAmt = uint96(p.stakeRequirement);
 
         // Original-slot recusal.
         if (recuser == c.originalArbiter && !c.originalRevealed) {
             if (block.timestamp >= c.originalCommitDeadline) revert CommitWindowClosed();
             if (c.originalCommitHash != bytes32(0)) revert CannotRecuseAfterCommit();
 
-            _releaseLock(recuser, stake);
+            _releaseLock(recuser, stakeAmt);
 
             address[] memory exclude = new address[](1);
             exclude[0] = recuser;
@@ -824,7 +824,7 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
             address replacement = _drawArbiter(seed, c.partyA, c.partyB, exclude);
 
             arbiters[replacement].caseCount += 1;
-            lockedStake[replacement] += stake;
+            lockedStake[replacement] += stakeAmt;
             lastArbitratedAt[_partyPairKey(c.partyA, c.partyB)][replacement] = uint64(block.timestamp);
             c.originalArbiter = replacement;
 
@@ -841,7 +841,7 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
         AppealSlot storage slot = c.appealSlots[slotIdx];
         if (slot.commitHash != bytes32(0)) revert CannotRecuseAfterCommit();
 
-        _releaseLock(recuser, stake);
+        _releaseLock(recuser, stakeAmt);
 
         address[] memory exc = new address[](3);
         exc[0] = c.originalArbiter;
@@ -852,7 +852,7 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
         address replacement2 = _drawArbiter(seed2, c.partyA, c.partyB, exc);
 
         arbiters[replacement2].caseCount += 1;
-        lockedStake[replacement2] += stake;
+        lockedStake[replacement2] += stakeAmt;
         lastArbitratedAt[_partyPairKey(c.partyA, c.partyB)][replacement2] = uint64(block.timestamp);
         slot.arbiter = replacement2;
 
@@ -862,10 +862,16 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
 
     /// @notice Submit the keccak commitment for this arbiter's vote.
     /// Routes by sender — the assigned original arbiter or an appeal-
-    /// slot arbiter (Phase 4). Same external signature for both phases
-    /// per de novo review (the arbiter's UI doesn't reveal which slot
+    /// slot arbiter. Same external signature for both phases per de
+    /// novo review (the arbiter's UI doesn't reveal which slot
     /// they're filling).
-    function commitVote(bytes32 caseId, bytes32 commitHash) external {
+    ///
+    /// nonReentrant is defense-in-depth (M-02): blocks an unusual
+    /// re-entry path where a malicious escrow's `applyArbitration`
+    /// callback (during finalize) would try to commitVote on behalf
+    /// of itself. Wouldn't succeed anyway since the escrow isn't an
+    /// assigned arbiter, but the guard makes the property explicit.
+    function commitVote(bytes32 caseId, bytes32 commitHash) external nonReentrant {
         Case storage c = _cases[caseId];
         if (c.state != CaseState.Voting) revert CaseNotInVotingState();
 
@@ -896,7 +902,7 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
         uint16 partyAPercentage,
         bytes32 salt,
         bytes32 rationaleDigest
-    ) external {
+    ) external nonReentrant {
         Case storage c = _cases[caseId];
         if (c.state != CaseState.Voting) revert CaseNotInVotingState();
         if (partyAPercentage > 100) revert InvalidPercentage();
@@ -1049,39 +1055,56 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
         c.escrowFeeReceived = received;
 
         Policy memory p = policy;
-        uint96 stake = uint96(p.stakeRequirement);
+        uint96 stakeAmt = uint96(p.stakeRequirement);
 
         // Release / slash arbiter locks.
-        _releaseLock(c.originalArbiter, stake);
+        _releaseLock(c.originalArbiter, stakeAmt);
         if (aRevealed) {
-            _releaseLock(slotA.arbiter, stake);
+            _releaseLock(slotA.arbiter, stakeAmt);
         } else {
-            _slashArbiter(slotA.arbiter, stake, caseId);
+            _slashArbiter(slotA.arbiter, stakeAmt, caseId);
         }
         if (bRevealed) {
-            _releaseLock(slotB.arbiter, stake);
+            _releaseLock(slotB.arbiter, stakeAmt);
         } else {
-            _slashArbiter(slotB.arbiter, stake, caseId);
+            _slashArbiter(slotB.arbiter, stakeAmt, caseId);
         }
 
         // Pot to distribute = escrow fee + appellant's held appeal fee.
         uint256 totalPot = received + c.appealFeeAmount;
-        uint256 perArbiter = (c.amount * p.perArbiterFeeBps) / BPS_DENOMINATOR;
-        uint256 paidToArbiters = 0;
+        uint256 perArbiterTarget = (c.amount * p.perArbiterFeeBps) / BPS_DENOMINATOR;
 
-        // Original arbiter: always paid (their reveal happened in the
-        // original phase, by definition of being in this branch).
-        if (perArbiter > 0 && perArbiter <= totalPot) {
-            claimable[c.originalArbiter][feeToken] += perArbiter;
-            paidToArbiters += perArbiter;
+        // M-01 fix: pre-compute how many arbiters get paid, then split
+        // either at the policy target rate (if the pot can satisfy
+        // everyone equally) or pro-rata (if it can't). Original is
+        // always counted — their reveal happened in the original phase
+        // by definition of being in this branch.
+        uint256 payableCount = 1;
+        if (aRevealed) ++payableCount;
+        if (bRevealed) ++payableCount;
+
+        uint256 perArbiterShare;
+        if (perArbiterTarget * payableCount <= totalPot) {
+            perArbiterShare = perArbiterTarget;
+        } else {
+            // Pot too small for the policy target — split equally among
+            // payable arbiters. Everyone gets the same reduced share;
+            // no first-come-first-served starvation.
+            perArbiterShare = totalPot / payableCount;
         }
-        if (aRevealed && paidToArbiters + perArbiter <= totalPot) {
-            claimable[slotA.arbiter][feeToken] += perArbiter;
-            paidToArbiters += perArbiter;
-        }
-        if (bRevealed && paidToArbiters + perArbiter <= totalPot) {
-            claimable[slotB.arbiter][feeToken] += perArbiter;
-            paidToArbiters += perArbiter;
+
+        uint256 paidToArbiters = 0;
+        if (perArbiterShare > 0) {
+            claimable[c.originalArbiter][feeToken] += perArbiterShare;
+            paidToArbiters += perArbiterShare;
+            if (aRevealed) {
+                claimable[slotA.arbiter][feeToken] += perArbiterShare;
+                paidToArbiters += perArbiterShare;
+            }
+            if (bRevealed) {
+                claimable[slotB.arbiter][feeToken] += perArbiterShare;
+                paidToArbiters += perArbiterShare;
+            }
         }
 
         // E4 (D3i*): refund the appellant's appeal fee from the
@@ -1125,7 +1148,11 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
     function _stallOriginal(Case storage c, bytes32 caseId) internal {
         Policy memory p = policy;
 
-        _slashArbiter(c.originalArbiter, p.stakeRequirement, caseId);
+        // Slash and capture the actual amount taken (L-04 — may be less
+        // than stakeRequirement if the arbiter was already slashed
+        // elsewhere). Use the returned value in the Stalled event so
+        // indexers see the real treasury delta.
+        uint96 slashed = _slashArbiter(c.originalArbiter, p.stakeRequirement, caseId);
 
         if (c.stallRound == 0) {
             c.stallRound = 1;
@@ -1144,12 +1171,12 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
             );
             requestToCase[requestId] = caseId;
 
-            emit Stalled(caseId, 0, p.stakeRequirement);
+            emit Stalled(caseId, 0, slashed);
             return;
         }
 
         // Round 1 stall → 50/50 default verdict.
-        emit Stalled(caseId, 1, p.stakeRequirement);
+        emit Stalled(caseId, 1, slashed);
         _applyDefault(c, caseId);
     }
 
@@ -1213,23 +1240,28 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
 
     /// @dev Slash `amount` ELCP from the arbiter's stakedAmount and
     /// release their lock for this case. Slashed amount → treasury in
-    /// the stake token. Used on non-reveal paths.
+    /// the stake token. Returns the actual slashed amount (may be
+    /// less than `amount` if the arbiter was already partially
+    /// slashed elsewhere — L-04).
     ///
     /// stakedAmount is capped at the arbiter's actual balance — if
     /// they were already partially slashed elsewhere we slash what's
     /// available without reverting. The lock release uses the strict
     /// _releaseLock helper (L-01) so accounting drift is loud.
-    function _slashArbiter(address arbiter, uint256 amount, bytes32 caseId) internal {
+    function _slashArbiter(address arbiter, uint256 amount, bytes32 caseId)
+        internal
+        returns (uint96 slashed)
+    {
         Arbiter storage a = arbiters[arbiter];
-        uint96 slash = uint96(amount);
-        if (slash > a.stakedAmount) slash = a.stakedAmount;
-        a.stakedAmount -= slash;
+        slashed = uint96(amount);
+        if (slashed > a.stakedAmount) slashed = a.stakedAmount;
+        a.stakedAmount -= slashed;
 
         _releaseLock(arbiter, uint96(amount));
 
-        if (slash > 0) {
-            treasuryAccrued[address(stakeToken)] += slash;
-            emit Slashed(arbiter, slash, caseId);
+        if (slashed > 0) {
+            treasuryAccrued[address(stakeToken)] += slashed;
+            emit Slashed(arbiter, slashed, caseId);
         }
     }
 
