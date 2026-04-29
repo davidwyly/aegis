@@ -356,3 +356,135 @@ Same shell. Body shows:
 
 This is the "public docket" view that lets observers see what the
 court has done historically without leaking in-flight details.
+
+### My queue (`/queue`)
+
+The signed-in arbiter's worklist. Lists cases where the connected
+wallet is currently the original arbiter or filling an appeal slot.
+
+**Header**:
+- H1 "My queue"
+- Subtle subhead: "Cases where you're the assigned arbiter."
+- Onboarding banner if encryption isn't configured: "You haven't
+  set up your encryption key. You won't be able to read encrypted
+  briefs until you do." → link to arbiter profile.
+
+**List of case rows**:
+- Case ID (mono, truncated)
+- Disputed amount
+- Action required: "Commit by 14:32 today" / "Reveal by tomorrow
+  09:00" — the most urgent action with a relative deadline.
+- Per-row CTA: "Open" → case workspace.
+
+**Sort by urgency**: cases closest to deadline first. Overdue
+cases (where the arbiter has missed a window) marked in red as
+"Overdue — slashing imminent".
+
+**De novo enforcement**: queue rows are intentionally
+undifferentiated. No "Original" / "Appeal" labels. Same row shape
+for both. The arbiter just sees "cases I need to act on."
+
+**Empty state**: "No cases assigned to you. New cases are drawn
+randomly from the eligible arbiter pool. Make sure you have
+sufficient ELCP staked to be eligible."
+
+### Arbiters roster (`/arbiters`)
+
+Public list of registered arbiters.
+
+**Header**: H1 "Arbiters" + subhead about the roster being
+DAO-curated.
+
+**Table**:
+- Address (mono, truncated, with ENS if available)
+- Status (active / revoked) — badge
+- ELCP staked
+- Cases handled (lifetime count from `caseCount`)
+- Joined (relative time of `ArbiterRegistered` event)
+
+**No verdict history**: D13 anonymity — don't expose per-arbiter
+verdict patterns publicly. The aggregate count is fine; specific
+verdicts attached to specific arbiters could enable bribery
+targeting. Designer should confirm this with PM.
+
+**Sort**: defaults to "active first, then by ELCP staked desc".
+Optional sort toggles for cases-handled or join date.
+
+**Empty state**: "No arbiters registered yet" + governance link.
+
+### Arbiter profile (`/arbiters/[address]`)
+
+Two distinct UX patterns depending on viewer:
+
+#### Public profile (anyone)
+
+- Address (mono, full, with copy button) + ENS
+- Status badge
+- ELCP staked
+- Cases handled (count only — no list of specific cases per D13)
+- Credential CID (linked to the off-chain pointer)
+- Joined date
+
+That's it. No verdict history, no reputation score (yet).
+
+#### Self profile (signed-in wallet matches the address)
+
+The arbiter sees additional sections for managing their setup:
+
+1. **Encryption key** — status (configured / not), public key
+   fingerprint, "Rotate key" action. Existing component
+   `configure-encryption.tsx`. If not configured, prominent CTA
+   to set it up — without an encryption key, the arbiter can't
+   decrypt briefs and shouldn't take cases.
+
+2. **Stake management** — current staked amount, locked vs free
+   stake (with explanation: "Locked stake is bonded to active
+   cases and can't be withdrawn until those resolve"). Stake /
+   unstake actions.
+
+3. **Pending claims** — claimable arbiter fees in any token,
+   with a "Claim" button per token. Wire to the contract's
+   `claim(token)`.
+
+4. **D13 cooldowns** — optional admin-style readout of which
+   party-pairs the arbiter is currently excluded from arbitrating
+   (per the 90-day cooldown). Useful for the arbiter to
+   understand their effective availability. Skip for v1 if
+   designer wants tighter scope.
+
+### Governance (`/governance`)
+
+Calldata builder for Eclipse DAO proposals. Power-user UI.
+
+**Layout**: form-driven, single column.
+
+**Sections** (each is a form that produces calldata):
+
+1. **Update policy** — fields for each Policy struct member
+   (commitWindow, revealWindow, graceWindow, appealWindow,
+   repeatArbiterCooldown, stakeRequirement, appealFeeBps,
+   perArbiterFeeBps, treasury). Pre-fill with current values.
+   Generate `setPolicy(...)` calldata + show the encoded bytes
+   for the multisig signer to copy into the DAO timelock UI.
+
+2. **Roster: register arbiter** — address + credentialCID.
+   Generates `registerArbiter(...)` calldata.
+
+3. **Roster: revoke arbiter** — address. Generates
+   `revokeArbiter(...)` calldata. Warning: this slashes the
+   arbiter's full stake to treasury.
+
+4. **Pause / unpause new cases** — toggle. Generates
+   `setNewCasesPaused(...)` calldata.
+
+5. **Withdraw treasury** — token + amount + recipient. Generates
+   `withdrawTreasury(...)` calldata.
+
+**Output**: a code block with the encoded calldata bytes, target
+contract address, and a copy button. Plus a "verify" view
+showing the decoded fields next to the bytes so the signer can
+sanity-check before submitting upstream.
+
+This is purposefully minimalist; the heavy lifting (proposal
+submission, voting, execution) happens in the DAO's own UI. Aegis's
+governance page just helps build the right calldata.
