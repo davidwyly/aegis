@@ -71,17 +71,15 @@ async function fixture() {
       callbackGasLimit: VRF_CALLBACK_GAS,
     },
     {
-      panelSize: 3,
-      voteWindow: VOTE_WINDOW,
+      commitWindow: VOTE_WINDOW,
       revealWindow: REVEAL_WINDOW,
       graceWindow: GRACE_WINDOW,
+      appealWindow: 60 * 60 * 24 * 7, // 7 days, D9
+      repeatArbiterCooldown: 60 * 60 * 24 * 90, // 90 days, D13
       stakeRequirement: STAKE_REQ,
-      panelFeeBps: PANEL_FEE_BPS,
+      appealFeeBps: 250, // 2.5%, D2
+      perArbiterFeeBps: 250, // 2.5%, D4
       treasury: treasury.address,
-      appealWindow: 60 * 60 * 24 * 7, // 7 days
-      appealPanelSize: 5,
-      appealBondAmount: ethers.parseEther("200"),
-      appealOverturnTolerance: 5,
     }
   )) as unknown as Aegis
   await aegis.waitForDeployment()
@@ -173,7 +171,7 @@ async function createAndFundEscrow(
 }
 
 describe("Aegis ↔ VaultraEscrow integration", () => {
-  it("real Vaultra dispute → Aegis panel verdict → on-chain settlement", async () => {
+  it("real Vaultra dispute → Aegis single-arbiter verdict → on-chain settlement", async () => {
     const ctx = await loadFixture(fixture)
     const {
       aegis,
@@ -186,21 +184,16 @@ describe("Aegis ↔ VaultraEscrow integration", () => {
       arbiterSigners,
     } = ctx
 
-    // ── Create + fund a non-milestone escrow on Vaultra ────────────
+    // Create + fund a non-milestone escrow on Vaultra.
     const amount = usdc("1000")
     const escrowId = await createAndFundEscrow(vaultra, usdcToken, client, worker, amount)
+    expect((await vaultra.getEscrow(escrowId)).arbiter).to.equal(await adapter.getAddress())
 
-    // Sanity: the adapter is the assigned arbiter on the escrow.
-    const e = await vaultra.getEscrow(escrowId)
-    expect(e.arbiter).to.equal(await adapter.getAddress())
-    expect(e.status).to.equal(VAULTRA_STATUS_ACTIVE)
-
-    // ── Worker raises a dispute on Vaultra ───────────────────────────
+    // Worker raises a dispute on Vaultra.
     await vaultra.connect(worker).raiseDisputeNoMilestone(escrowId)
-    const eDisp = await vaultra.getEscrow(escrowId)
-    expect(eDisp.status).to.equal(VAULTRA_STATUS_DISPUTED)
+    expect((await vaultra.getEscrow(escrowId)).status).to.equal(VAULTRA_STATUS_DISPUTED)
 
-    // ── Adapter registers the case + Aegis opens it ─────────────────
+    // Adapter registers the case; Aegis opens it.
     const expectedCaseId = await adapter.packCaseId(escrowId, 0n, true)
     await adapter.connect(client).registerCase(escrowId, 0n, true)
 
@@ -218,10 +211,10 @@ describe("Aegis ↔ VaultraEscrow integration", () => {
     const aegisCaseId = requested!.args.caseId as string
     const requestId = requested!.args.vrfRequestId as bigint
 
-    // Drive the VRF fulfillment so the panel is seated.
+    // VRF fulfillment seats a single original arbiter.
     const fulfillTx = await ctx.coordinator.fulfillWithSingleWord(requestId, 0xdeadbeefcafebaben)
     const fulfillReceipt = await fulfillTx.wait()
-    const openedLog = fulfillReceipt!.logs
+    const drawnLog = fulfillReceipt!.logs
       .map((l) => {
         try {
           return aegis.interface.parseLog(l as any)
@@ -229,18 +222,17 @@ describe("Aegis ↔ VaultraEscrow integration", () => {
           return null
         }
       })
-      .find((e) => e?.name === "CaseOpened")
-    expect(openedLog).to.exist
-    const panel = (openedLog!.args.panel as string[]).map((a) => a.toLowerCase())
-    const panelSigners = arbiterSigners.filter((s) =>
-      panel.includes(s.address.toLowerCase())
-    )
-    expect(panelSigners.length).to.equal(3)
-    // No party can be a panelist.
-    expect(panel).to.not.include((await client.getAddress()).toLowerCase())
-    expect(panel).to.not.include((await worker.getAddress()).toLowerCase())
+      .find((e) => e?.name === "ArbiterDrawn")
+    expect(drawnLog).to.exist
+    const arbiterAddr = (drawnLog!.args.arbiter as string).toLowerCase()
+    const arbiterSigner = arbiterSigners.find(
+      (s) => s.address.toLowerCase() === arbiterAddr
+    )!
+    // Sanity: drawn arbiter is not a party.
+    expect(arbiterAddr).to.not.equal((await client.getAddress()).toLowerCase())
+    expect(arbiterAddr).to.not.equal((await worker.getAddress()).toLowerCase())
 
-    // Sanity: Aegis read the right context out of the adapter.
+    // Aegis read the right context out of the adapter.
     const aegisCase = await aegis.getCase(aegisCaseId)
     expect(aegisCase.partyA.toLowerCase()).to.equal(
       (await client.getAddress()).toLowerCase()
@@ -248,46 +240,33 @@ describe("Aegis ↔ VaultraEscrow integration", () => {
     expect(aegisCase.partyB.toLowerCase()).to.equal(
       (await worker.getAddress()).toLowerCase()
     )
-    expect(aegisCase.feeToken.toLowerCase()).to.equal(
-      (await usdcToken.getAddress()).toLowerCase()
-    )
     expect(aegisCase.amount).to.equal(amount)
 
-    // ── Panel commit + reveal ────────────────────────────────────────
-    const votes = [
-      { pct: 30, salt: ethers.id("salt-A"), digest: ethers.id("digest-A") },
-      { pct: 50, salt: ethers.id("salt-B"), digest: ethers.id("digest-B") },
-      { pct: 70, salt: ethers.id("salt-C"), digest: ethers.id("digest-C") },
-    ]
-    for (let i = 0; i < panelSigners.length; i++) {
-      const v = votes[i]
-      const h = await aegis.hashVote(panelSigners[i].address, aegisCaseId, v.pct, v.salt, v.digest)
-      await aegis.connect(panelSigners[i]).commitVote(aegisCaseId, h)
-    }
+    // Single-arbiter commit + reveal.
+    const pct = 50
+    const salt = ethers.id("salt")
+    const digest = ethers.id("digest")
+    const h = await aegis.hashVote(arbiterSigner.address, aegisCaseId, pct, salt, digest)
+    await aegis.connect(arbiterSigner).commitVote(aegisCaseId, h)
     await time.increase(VOTE_WINDOW + 1)
-    for (let i = 0; i < panelSigners.length; i++) {
-      const v = votes[i]
-      await aegis.connect(panelSigners[i]).revealVote(aegisCaseId, v.pct, v.salt, v.digest)
-    }
+    await aegis.connect(arbiterSigner).revealVote(aegisCaseId, pct, salt, digest)
+    expect((await aegis.getCase(aegisCaseId)).state).to.equal(3 /* AppealableResolved */)
 
-    // ── Snapshot balances then finalize ─────────────────────────────
+    // Snapshot balances before finalize.
     const usdcAddr = await usdcToken.getAddress()
     const clientUsdcBefore = await usdcToken.balanceOf(client.getAddress())
     const workerUsdcBefore = await usdcToken.balanceOf(worker.getAddress())
 
-    // Stage the verdict (AppealableResolved) — escrow not yet settled.
-    await aegis.finalize(aegisCaseId)
-    // No appeal: advance past the 7-day appeal window and finalize again
-    // to apply the verdict to Vaultra.
+    // No appeal: advance past the 7-day appeal window and finalize.
     await time.increase(60 * 60 * 24 * 7 + 1)
     await aegis.finalize(aegisCaseId)
 
-    // ── Assertions: Vaultra escrow resolved at the median (50%) ─────
-    const eAfter = await vaultra.getEscrow(escrowId)
-    expect(eAfter.status).to.equal(VAULTRA_STATUS_COMPLETED)
+    // Vaultra escrow settles at 50/50.
+    expect((await vaultra.getEscrow(escrowId)).status).to.equal(VAULTRA_STATUS_COMPLETED)
 
-    // median(30,50,70) = 50 → 500 USDC each (before worker dispute fee deduction)
-    // Worker dispute fee deducts 2.5% of total = 25 USDC from worker payout.
+    // 50/50 verdict: client gets half (no fee deducted from client side
+    // since that came from the held collateral). Worker gets half minus
+    // the 2.5% Vaultra dispute cut.
     const clientShare = (amount * 50n) / 100n // 500
     const workerShareBeforeFee = amount - clientShare // 500
     const workerDisputeCut = (amount * VAULTRA_FEE_BPS) / VAULTRA_FEE_DENOM // 25
@@ -299,27 +278,24 @@ describe("Aegis ↔ VaultraEscrow integration", () => {
       workerUsdcBefore + workerShare
     )
 
-    // ── Aegis received the arbiter cut ──────────────────────────────
-    // Vaultra paid: client collateral (25) + worker cut (25) = 50 USDC to the
-    // adapter, which forwarded it to Aegis at applyArbitration time.
+    // Aegis received the arbiter cut: client collateral (25) + worker cut (25) = 50 USDC.
     const expectedFee = disputeCollateral(amount) + workerDisputeCut // 50
-    // 80% to revealing panelists, 20% to treasury. 3 panelists each got 40/3 = 13 dust 1.
-    const panelTotal = (expectedFee * BigInt(PANEL_FEE_BPS)) / 10_000n // 40
-    const each = panelTotal / 3n // 13
-    const distributed = each * 3n // 39
-    const treasuryAmount = expectedFee - panelTotal + (panelTotal - distributed)
+    // D1(c) split: half (2.5% of amount = 25) to arbiter, half (25) rebated 50/50 by verdict.
+    const arbiterShare = expectedFee / 2n // 25
+    const rebatePool = expectedFee - arbiterShare // 25
+    const partyARebate = (rebatePool * BigInt(pct)) / 100n // 12 (with floor)
+    const partyBRebate = rebatePool - partyARebate // 13
+    expect(await aegis.claimable(arbiterSigner.address, usdcAddr)).to.equal(arbiterShare)
+    expect(await aegis.claimable(client.getAddress(), usdcAddr)).to.equal(partyARebate)
+    expect(await aegis.claimable(worker.getAddress(), usdcAddr)).to.equal(partyBRebate)
+    // Treasury gets nothing on the no-appeal path under D4.
+    expect(await aegis.treasuryAccrued(usdcAddr)).to.equal(0)
 
-    for (const p of panelSigners) {
-      expect(await aegis.claimable(p.address, usdcAddr)).to.equal(each)
-    }
-    expect(await aegis.treasuryAccrued(usdcAddr)).to.equal(treasuryAmount)
-
-    // ── A panelist can claim their fee ─────────────────────────────
-    const me = panelSigners[0]
-    const before = await usdcToken.balanceOf(me.address)
-    await aegis.connect(me).claim(usdcAddr)
-    expect(await usdcToken.balanceOf(me.address)).to.equal(before + each)
-    expect(await aegis.claimable(me.address, usdcAddr)).to.equal(0)
+    // Arbiter can claim their fee.
+    const before = await usdcToken.balanceOf(arbiterSigner.address)
+    await aegis.connect(arbiterSigner).claim(usdcAddr)
+    expect(await usdcToken.balanceOf(arbiterSigner.address)).to.equal(before + arbiterShare)
+    expect(await aegis.claimable(arbiterSigner.address, usdcAddr)).to.equal(0)
 
     void treasury
   })
