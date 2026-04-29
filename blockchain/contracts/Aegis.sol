@@ -724,8 +724,89 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
         revert NotImplemented(); // Phase 4: appeal-slot reveal
     }
 
-    function finalize(bytes32 /*caseId*/) external nonReentrant {
-        revert NotImplemented();
+    /// @notice Push a resolved case to the underlying escrow, capture
+    /// the arbitration fee, and distribute it. Anyone can call —
+    /// finalization is permissionless. Routes by case state:
+    ///
+    /// - AppealableResolved + appeal window expired ⇒ no-appeal settle
+    ///   (this chunk).
+    /// - Voting + reveal deadline passed ⇒ stall fallback (Phase 5).
+    /// - AwaitingAppealPanel + VRF stuck (operational guard) (Phase 5).
+    /// - Voting (appeal phase) + reveal deadline passed ⇒ appeal
+    ///   settle (Phase 4).
+    function finalize(bytes32 caseId) external nonReentrant {
+        Case storage c = _cases[caseId];
+
+        if (c.state == CaseState.AppealableResolved) {
+            if (block.timestamp < c.appealDeadline) revert AppealWindowOpen();
+            _settleNoAppeal(c, caseId);
+            return;
+        }
+
+        if (c.state == CaseState.Resolved || c.state == CaseState.Defaulted) {
+            revert CaseAlreadyFinalized();
+        }
+
+        if (c.state == CaseState.None) {
+            revert CaseNotFound();
+        }
+
+        revert NotImplemented(); // Phase 4 (appeal settle) + Phase 5 (stall)
+    }
+
+    /// @dev No-appeal happy path. Apply the original arbiter's verdict
+    /// to the escrow, capture the arbitration fee via balance delta,
+    /// release the arbiter's stake lock, distribute per D1(c):
+    /// 2.5% to the arbiter + 2.5% rebated to parties proportional to
+    /// the verdict. Then clear liveCaseFor and transition to Resolved.
+    function _settleNoAppeal(Case storage c, bytes32 caseId) internal {
+        uint16 percentage = c.originalPercentage;
+        bytes32 digest = c.originalDigest;
+        address feeToken = c.feeToken;
+        address arbiter = c.originalArbiter;
+
+        // External call: apply verdict, escrow pays our fee.
+        uint256 balBefore = IERC20(feeToken).balanceOf(address(this));
+        IArbitrableEscrow(c.escrow).applyArbitration(caseId, percentage, digest);
+        uint256 balAfter = IERC20(feeToken).balanceOf(address(this));
+        uint256 received = balAfter - balBefore;
+        c.escrowFeeReceived = received;
+
+        // Release the original arbiter's stake lock.
+        uint96 release = uint96(policy.stakeRequirement);
+        uint96 cur = lockedStake[arbiter];
+        lockedStake[arbiter] = cur > release ? cur - release : 0;
+
+        // Distribute the 5% pot per D1(c): half to arbiter,
+        // half rebated to parties pro-rata by verdict.
+        if (received > 0) {
+            uint256 arbiterShare = received / 2;
+            uint256 rebatePool = received - arbiterShare;
+
+            claimable[arbiter][feeToken] += arbiterShare;
+
+            uint256 partyAShare = (rebatePool * percentage) / 100;
+            uint256 partyBShare = rebatePool - partyAShare;
+
+            if (partyAShare > 0) {
+                claimable[c.partyA][feeToken] += partyAShare;
+                emit PartyRebated(caseId, c.partyA, feeToken, partyAShare);
+            }
+            if (partyBShare > 0) {
+                claimable[c.partyB][feeToken] += partyBShare;
+                emit PartyRebated(caseId, c.partyB, feeToken, partyBShare);
+            }
+
+            emit FeesAccrued(caseId, feeToken, received, arbiterShare, rebatePool, 0);
+            c.feesDistributed = true;
+        }
+
+        // Clear the active-case marker so a future dispute on the same
+        // escrow / escrowCaseId can be opened.
+        delete liveCaseFor[c.escrow][c.escrowCaseId];
+        c.state = CaseState.Resolved;
+
+        emit CaseResolved(caseId, percentage, digest);
     }
 
     function requestAppeal(bytes32 /*caseId*/) external nonReentrant {
