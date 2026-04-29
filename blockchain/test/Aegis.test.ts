@@ -750,4 +750,176 @@ describe("Aegis (single-arbiter + appeal-of-3)", () => {
       void partyBUsdcBefore
     })
   })
+
+  // ============================================================
+  // Stall paths — original arbiter fails to reveal. Round 0
+  // redraws via VRF; round 1 falls back to a 50/50 default.
+  // ============================================================
+
+  describe("stall + redraw", () => {
+    it("round 0: original arbiter doesn't reveal → slash + redraw via fresh VRF", async () => {
+      const {
+        aegis,
+        coordinator,
+        mock,
+        governance,
+        partyA,
+        partyB,
+        usdcToken,
+        elcpToken,
+        arbiterSigners,
+      } = await loadFixture(deployFixture)
+      await registerAndStake(aegis, governance, arbiterSigners.slice(0, 6))
+      await stageMockCase(
+        mock,
+        usdcToken,
+        CASE_KEY,
+        partyA.address,
+        partyB.address,
+        usdc("1000"),
+        usdc("50"),
+      )
+      const { caseId, arbiter: firstArbiter } = await openAndDraw(
+        aegis,
+        coordinator,
+        await mock.getAddress(),
+        CASE_KEY,
+      )
+
+      // Skip past the reveal deadline without committing or revealing.
+      await time.increase(COMMIT_WINDOW + REVEAL_WINDOW + 1)
+
+      // finalize triggers stall round 0: slash + new VRF request.
+      const stallTx = await aegis.finalize(caseId)
+      const stallReceipt = await stallTx.wait()
+      const stalledLog = stallReceipt!.logs
+        .map((l) => {
+          try {
+            return aegis.interface.parseLog(l as any)
+          } catch {
+            return null
+          }
+        })
+        .find((e) => e?.name === "Stalled")
+      expect(stalledLog).to.exist
+      expect(stalledLog!.args.round).to.equal(0)
+
+      // First arbiter slashed; ELCP → treasury.
+      const elcpAddr = await elcpToken.getAddress()
+      expect((await aegis.arbiters(firstArbiter)).stakedAmount).to.equal(0)
+      expect(await aegis.treasuryAccrued(elcpAddr)).to.equal(STAKE_REQ)
+
+      // State is AwaitingArbiter; stallRound bumped to 1; old arbiter
+      // is still recorded so the redraw exclusion sees them.
+      const cAfterStall = await aegis.getCase(caseId)
+      expect(cAfterStall.state).to.equal(STATE_AWAITING_ARBITER)
+      expect(cAfterStall.stallRound).to.equal(1)
+      expect(cAfterStall.originalArbiter).to.equal(firstArbiter)
+
+      // Fulfill the redraw VRF — exclusion ensures it's a different arbiter.
+      const newRequestId = (
+        stallReceipt!.logs
+          .map((l) => {
+            try {
+              return mock.interface.parseLog(l as any)
+            } catch {
+              return null
+            }
+          })
+          .find(() => false)
+      )
+      // The Stalled event doesn't carry the requestId; finalize emits the
+      // VRF request internally via requestRandomWords. We can find it by
+      // checking requestToCase mapping with the most recent requestId, or
+      // by reading the MockVRFCoordinator's internal counter.
+      const reqId = ((await coordinator.nextRequestId()) - 1n)
+      const fulfillTx = await coordinator.fulfillWithSingleWord(reqId, 0xc0ffeen)
+      const fulfillReceipt = await fulfillTx.wait()
+      const drawnLog = fulfillReceipt!.logs
+        .map((l) => {
+          try {
+            return aegis.interface.parseLog(l as any)
+          } catch {
+            return null
+          }
+        })
+        .find((e) => e?.name === "ArbiterDrawn")
+      const newArbiter = drawnLog!.args.arbiter as string
+      expect(newArbiter).to.not.equal(firstArbiter)
+
+      const cAfterDraw = await aegis.getCase(caseId)
+      expect(cAfterDraw.state).to.equal(STATE_VOTING)
+      expect(cAfterDraw.originalArbiter).to.equal(newArbiter)
+      void newRequestId
+    })
+
+    it("round 1: redraw also fails → 50/50 default applied", async () => {
+      const {
+        aegis,
+        coordinator,
+        mock,
+        governance,
+        partyA,
+        partyB,
+        usdcToken,
+        elcpToken,
+        arbiterSigners,
+      } = await loadFixture(deployFixture)
+      await registerAndStake(aegis, governance, arbiterSigners.slice(0, 6))
+      await stageMockCase(
+        mock,
+        usdcToken,
+        CASE_KEY,
+        partyA.address,
+        partyB.address,
+        usdc("1000"),
+        usdc("50"),
+      )
+      const { caseId, arbiter: firstArbiter } = await openAndDraw(
+        aegis,
+        coordinator,
+        await mock.getAddress(),
+        CASE_KEY,
+      )
+      // First stall.
+      await time.increase(COMMIT_WINDOW + REVEAL_WINDOW + 1)
+      await aegis.finalize(caseId)
+      const reqId1 = ((await coordinator.nextRequestId()) - 1n)
+      await coordinator.fulfillWithSingleWord(reqId1, 0xc0ffeen)
+      const cMid = await aegis.getCase(caseId)
+      const secondArbiter = cMid.originalArbiter
+      expect(secondArbiter).to.not.equal(firstArbiter)
+
+      // Second arbiter also fails to reveal.
+      await time.increase(COMMIT_WINDOW + REVEAL_WINDOW + 1)
+      const finalTx = await aegis.finalize(caseId)
+      const finalReceipt = await finalTx.wait()
+      const stalled = finalReceipt!.logs
+        .map((l) => {
+          try {
+            return aegis.interface.parseLog(l as any)
+          } catch {
+            return null
+          }
+        })
+        .find((e) => e?.name === "Stalled")
+      expect(stalled!.args.round).to.equal(1)
+
+      const cAfter = await aegis.getCase(caseId)
+      expect(cAfter.state).to.equal(STATE_DEFAULTED)
+
+      // Both arbiters slashed → 200 ELCP to treasury.
+      const elcpAddr = await elcpToken.getAddress()
+      expect(await aegis.treasuryAccrued(elcpAddr)).to.equal(STAKE_REQ * 2n)
+
+      // Default verdict applied to escrow: 50/50, no arbiter pay,
+      // entire 50 USDC fee rebated 50/50 to parties (25 each).
+      const usdcAddr = await usdcToken.getAddress()
+      expect(await aegis.claimable(partyA.address, usdcAddr)).to.equal(usdc("25"))
+      expect(await aegis.claimable(partyB.address, usdcAddr)).to.equal(usdc("25"))
+      // No arbiter share — neither did the work.
+      expect(await aegis.claimable(firstArbiter, usdcAddr)).to.equal(0)
+      expect(await aegis.claimable(secondArbiter, usdcAddr)).to.equal(0)
+    })
+  })
 })
