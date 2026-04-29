@@ -150,8 +150,7 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
     enum CaseState {
         None,
         AwaitingArbiter, // VRF requested; arbiter not yet drawn
-        Voting, // commit window open
-        Revealing, // reveal window open
+        Voting, // commit + reveal window (sub-windows gated by deadlines)
         AppealableResolved, // original revealed; appeal window open
         AwaitingAppealPanel, // appeal requested; VRF for 2 new arbiters pending
         Resolved, // applyArbitration called; case closed
@@ -372,6 +371,8 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
     error CaseAlreadyLive();
     error UnknownVrfRequest();
     error CaseNotAwaitingPanel();
+    error CaseNotInVotingState();
+    error NotAssignedArbiter();
     error NotImplemented();
 
     // ============================================================
@@ -665,17 +666,62 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
         revert NotImplemented();
     }
 
-    function commitVote(bytes32 /*caseId*/, bytes32 /*commitHash*/) external {
-        revert NotImplemented();
+    /// @notice Submit the keccak commitment for this arbiter's vote.
+    /// Routes by sender — the assigned original arbiter or an appeal-
+    /// slot arbiter (Phase 4). Same external signature for both phases
+    /// per de novo review (the arbiter's UI doesn't reveal which slot
+    /// they're filling).
+    function commitVote(bytes32 caseId, bytes32 commitHash) external {
+        Case storage c = _cases[caseId];
+        if (c.state != CaseState.Voting) revert CaseNotInVotingState();
+
+        if (msg.sender == c.originalArbiter && !c.originalRevealed) {
+            if (block.timestamp >= c.originalCommitDeadline) revert CommitWindowClosed();
+            if (c.originalCommitHash != bytes32(0)) revert AlreadyCommitted();
+            c.originalCommitHash = commitHash;
+            emit Committed(caseId, msg.sender, commitHash);
+            return;
+        }
+
+        revert NotImplemented(); // Phase 4: appeal-slot commit
     }
 
+    /// @notice Reveal the vote that was previously committed. The
+    /// keccak hash recomputed from the revealed values must match
+    /// the stored commit. Original-arbiter reveals immediately
+    /// transition the case to AppealableResolved (no peers to wait
+    /// for); appeal-slot reveals (Phase 4) wait for both peers.
     function revealVote(
-        bytes32 /*caseId*/,
-        uint16 /*partyAPercentage*/,
-        bytes32 /*salt*/,
-        bytes32 /*rationaleDigest*/
+        bytes32 caseId,
+        uint16 partyAPercentage,
+        bytes32 salt,
+        bytes32 rationaleDigest
     ) external {
-        revert NotImplemented();
+        Case storage c = _cases[caseId];
+        if (c.state != CaseState.Voting) revert CaseNotInVotingState();
+        if (partyAPercentage > 100) revert InvalidPercentage();
+
+        if (msg.sender == c.originalArbiter && !c.originalRevealed) {
+            if (block.timestamp < c.originalCommitDeadline) revert CommitWindowOpen();
+            if (block.timestamp >= c.originalRevealDeadline) revert RevealWindowClosed();
+            if (c.originalCommitHash == bytes32(0)) revert NoCommit();
+
+            bytes32 expected = keccak256(abi.encode(
+                msg.sender, caseId, partyAPercentage, salt, rationaleDigest
+            ));
+            if (expected != c.originalCommitHash) revert CommitMismatch();
+
+            c.originalPercentage = partyAPercentage;
+            c.originalDigest = rationaleDigest;
+            c.originalRevealed = true;
+            c.state = CaseState.AppealableResolved;
+            c.appealDeadline = uint64(block.timestamp + policy.appealWindow);
+
+            emit Revealed(caseId, msg.sender, partyAPercentage, rationaleDigest);
+            return;
+        }
+
+        revert NotImplemented(); // Phase 4: appeal-slot reveal
     }
 
     function finalize(bytes32 /*caseId*/) external nonReentrant {
