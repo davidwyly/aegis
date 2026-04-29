@@ -131,6 +131,109 @@ the fee; refund logic can be added later if appellants complain.
   The economic disincentive carries the integrity, not on-chain
   blinding.
 
+## Sequence diagrams
+
+### Happy path — no appeal
+
+```mermaid
+sequenceDiagram
+    actor Party
+    participant Vaultra
+    participant Keeper
+    participant Adapter
+    participant Aegis
+    participant VRF
+    actor Arbiter
+
+    Party->>Vaultra: raiseDispute()
+    Keeper->>Adapter: registerCase(escrowId, milestoneIdx)
+    Keeper->>Aegis: openDispute(escrow, caseId)
+    Aegis->>VRF: requestRandomness
+    VRF-->>Aegis: fulfillRandomWords(seed)
+    Note over Aegis: draw 1 arbiter
+    Arbiter->>Aegis: commitVote(caseId, hash)
+    Arbiter->>Aegis: revealVote(caseId, %, salt, digest)
+    Note over Aegis: state = AppealableResolved<br/>appeal window opens
+    Note over Aegis: ... appeal window expires, no appeal ...
+    Keeper->>Aegis: finalize(caseId)
+    Aegis->>Adapter: applyArbitration(caseId, %, digest)
+    Adapter->>Vaultra: resolveDispute(...)
+    Vaultra-->>Adapter: pays 5% fee
+    Adapter->>Aegis: forwards 5% fee
+    Arbiter->>Aegis: claim(token)
+```
+
+### Happy path — appeal filed
+
+```mermaid
+sequenceDiagram
+    actor Appellant
+    participant Aegis
+    participant VRF
+    actor OrigArbiter
+    actor NewArbA
+    actor NewArbB
+    participant Adapter
+
+    Note over Aegis: state = AppealableResolved<br/>(original verdict live)
+    Appellant->>Aegis: requestAppeal(caseId) + 2.5% fee
+    Aegis->>VRF: requestRandomness
+    VRF-->>Aegis: fulfillRandomWords(seed)
+    Note over Aegis: draw 2 arbiters,<br/>excluding OrigArbiter
+    NewArbA->>Aegis: commitVote (blind)
+    NewArbB->>Aegis: commitVote (blind)
+    Note over Aegis: commit window closes
+    NewArbA->>Aegis: revealVote
+    NewArbB->>Aegis: revealVote
+    Aegis->>Aegis: median(orig, A, B)
+    Aegis->>Adapter: applyArbitration(caseId, median, digest)
+    Adapter-->>Aegis: forwards 5% escrow fee
+    Note over Aegis: pot = 5% + 2.5% appeal fee = 7.5%<br/>each arbiter credited 2.5%
+    OrigArbiter->>Aegis: claim
+    NewArbA->>Aegis: claim
+    NewArbB->>Aegis: claim
+```
+
+### Commit-before-peek protocol
+
+The on-chain verdict is public the moment the original arbiter reveals.
+"Blind" appeal voting is therefore enforced by the *Aegis UI* + the
+non-reveal slashing penalty, not by cryptography.
+
+```mermaid
+sequenceDiagram
+    actor Arbiter
+    participant UI as Aegis UI
+    participant Aegis as Aegis (on-chain)
+    participant Chain as Block explorer
+
+    Note over Arbiter,Chain: Arbiter is drawn for the appeal panel.
+    Arbiter->>UI: open case
+    UI-->>Arbiter: shows briefs + evidence<br/>(original verdict HIDDEN)
+    Arbiter->>UI: submit commit hash
+    UI->>Aegis: commitVote(caseId, hash)
+    Aegis-->>UI: committed
+    Note over UI: only NOW does the UI<br/>reveal the original verdict
+    UI-->>Arbiter: shows original verdict (informational)
+    Arbiter->>Aegis: revealVote(caseId, %, salt, digest)
+```
+
+**Threat model**: a determined arbiter can read `c.partyAPercentage`
+directly from the contract via an explorer before committing. Defense:
+
+1. **No incentive to peek-then-bail.** The arbiter's commit hash is
+   binding. If they peek and dislike their commit, refusing to reveal
+   costs them one `stakeRequirement` bond — typically more than they
+   could earn by gaming a single case.
+2. **Short commit window.** Set `commitWindow` short enough that a
+   peek-and-recompute attack window is small.
+3. **2-of-3 collusion barrier.** Even a peeking arbiter cannot swing
+   the median alone; their peer must also disagree with the original
+   in the same direction.
+
+The blinding is therefore "soft" by cryptographic standards but
+"hard" by economic standards. Acceptable.
+
 ## Open questions still on the table
 
 1. **No-appeal payout to original arbiter.** Option A (2.5% +
