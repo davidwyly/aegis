@@ -13,6 +13,8 @@ import { CaseStatusBadge } from "@/components/case-status-badge"
 import { BriefEditor } from "@/components/brief-editor"
 import { CommitRevealForm } from "@/components/commit-reveal-form"
 import { SaltRecoveryBanner } from "@/components/salt-recovery-banner"
+import { ArbiterChecklist } from "@/components/arbiter-checklist"
+import { readArbiterProfile } from "@/lib/arbiters/profile"
 import { EvidencePanel } from "@/components/evidence-panel"
 import { CaseTimeline } from "@/components/case-timeline"
 import { assembleTimeline } from "@/lib/cases/timeline"
@@ -56,6 +58,17 @@ export default async function CaseDetailPage({
   // gate de novo UI sanitization — assigned arbiters don't see panel
   // listings, appeal-context labels, or peer arbiter identities.
   const isAssignedArbiter = isPanelist || isAppealPanelist
+  // Find the viewer's specific panel row (original or appeal) to know
+  // their commit/reveal progress for the checklist.
+  const viewerPanelRow = !viewer
+    ? null
+    : (panel.find((p) => p.panelistAddress.toLowerCase() === viewer.toLowerCase()) ??
+        appealPanel.find((p) => p.panelistAddress.toLowerCase() === viewer.toLowerCase()) ??
+        null)
+  // Encryption-key status — gate the checklist's first item.
+  const viewerProfile = isAssignedArbiter && viewer
+    ? await readArbiterProfile(viewer)
+    : null
   const appealPhase: "commit" | "reveal" | "closed" =
     c.status === "appeal_open"
       ? "commit"
@@ -356,18 +369,28 @@ export default async function CaseDetailPage({
           slot or one of the two appeal slots. The contract routes by
           msg.sender; the form looks identical to the arbiter. */}
       {isAssignedArbiter && (
-        <section className="card">
-          <h2 className="text-sm font-medium uppercase tracking-wide text-zinc-500">
-            Your vote
-          </h2>
-          <div className="mt-3">
-            <CommitRevealForm
-              aegisAddress={c.aegisAddress as `0x${string}`}
-              caseId={c.caseId as `0x${string}`}
-              phase={isPanelist ? phase : appealPhase}
-            />
-          </div>
-        </section>
+        <div className="grid gap-6 lg:grid-cols-[1fr,18rem]">
+          <section className="card">
+            <h2 className="text-sm font-medium uppercase tracking-wide text-zinc-500">
+              Your vote
+            </h2>
+            <div className="mt-3">
+              <CommitRevealForm
+                aegisAddress={c.aegisAddress as `0x${string}`}
+                caseId={c.caseId as `0x${string}`}
+                phase={isPanelist ? phase : appealPhase}
+              />
+            </div>
+          </section>
+          <ArbiterChecklist
+            hasCommitted={Boolean(viewerPanelRow?.committedAt)}
+            hasRevealed={Boolean(viewerPanelRow?.revealedAt)}
+            inCommitWindow={(isPanelist ? phase : appealPhase) === "commit"}
+            inRevealWindow={(isPanelist ? phase : appealPhase) === "reveal"}
+            hasEncryptionKey={Boolean(viewerProfile?.encryptionPubkey)}
+            arbiterAddress={viewer ?? ""}
+          />
+        </div>
       )}
 
       {/* Appeal panel listing is hidden from assigned arbiters per de
