@@ -567,3 +567,238 @@ states above.
   (not a toast) until user switches.
 - Session expired → auto-prompt re-sign on the next protected
   action, not on every page load.
+
+## Cross-cutting concerns
+
+### Loading states
+
+- Skeletons over spinners. A loading row in the cases table looks
+  like the row, just with a pulsing zinc-100/800 stripe instead of
+  text. Same for arbiter cards and case workspace sections.
+- Initial route load: zinc-100 background pulse while server
+  components render. Don't show a full-page spinner — Next.js's
+  streaming behavior should hand off section-by-section.
+- Tx submitting: button text changes to "Confirming…" with no
+  spinner; the wallet handles its own UI. After tx hash, "Waiting
+  for confirmation…" with a small linked tx hash.
+
+### Empty states
+
+Always text-first. No cute illustrations.
+
+- "No cases yet"
+- "No arbiters registered yet"
+- "No keeper failures recorded ✓"
+- "Your queue is empty. New cases are drawn randomly."
+
+If there's a relevant action, link to it inline. Don't build big
+empty-state cards with hero illustrations — that's a consumer-app
+pattern that doesn't fit the court vibe.
+
+### Error states
+
+- **Inline errors** for form validation. Below the field, red text,
+  no icons.
+- **Banner errors** for actions that span the page (e.g., "Tx
+  reverted: NotEnoughArbiters"). Top of the affected section,
+  dismissible.
+- **Toast errors** for transient issues (RPC timeout, wallet
+  cancellation). Top-right, auto-dismiss after 5s.
+
+Error copy: surface the contract revert reason verbatim when
+useful. Don't translate `NotEnoughArbiters()` into "Something
+went wrong" — the user (especially admin) wants the real signal.
+For party / arbiter UX, wrap the technical name in friendly
+context: "The arbiter pool is too small to draw a new panel.
+Governance is recruiting; try again soon."
+
+### Notifications / toasts
+
+Used sparingly. Triggered on:
+- Tx confirmed (linked to explorer)
+- Brief saved
+- Encryption key configured
+- Stake / unstake completed
+- Claim received
+
+Don't notify on every read or every navigation. Toasts are for
+"something happened that the user took an action to cause."
+
+### Mobile
+
+Aegis is primarily a desktop app — the use cases (filing briefs,
+reviewing evidence, governance calldata builder) are
+laptop-friendly. But the public ledger and case workspace should
+be readable on phone.
+
+- **Phone**: stacked single column. Cases ledger becomes a list of
+  cards instead of a table. Case workspace sections stack
+  vertically (briefs become tabs: "Your brief / Their brief"
+  rather than side-by-side).
+- **Don't ship**: governance calldata builder, admin dashboard.
+  Hide them behind a "use desktop" message on phone — they're
+  power-user surfaces and a cramped phone UI invites mistakes.
+- **Touch targets**: 44px minimum on phone. The current tight
+  density needs loosening on mobile.
+
+### Real-time updates
+
+The app polls (or subscribes to events) for state changes. The
+UI should re-render gracefully when:
+- A new VRF arbiter is drawn (case status flips)
+- An arbiter commits or reveals (deadline display updates)
+- An appeal is filed (state flips, party UI gains/loses appeal
+  button)
+
+Use optimistic updates for actions the user just took (e.g., they
+just filed a brief — show it immediately rather than waiting for
+the next poll).
+
+## Critical UX invariants
+
+These are non-negotiable and the designer must internalize them
+before designing any arbiter-facing flow.
+
+### 1. De novo arbiter blindness
+
+Already covered above; restating the checklist:
+
+- Arbiter UI must NOT show: case state name (badge), prior
+  verdict, peer arbiter identity, full event timeline,
+  "appeal" / "panel" / "round" copy anywhere.
+- Arbiter UI MUST show: briefs, evidence, parties, amount, the
+  arbiter's own commit/reveal status, deadline for their action.
+- Queue rows are undifferentiated between original and appeal
+  cases.
+- Onboarding / arbiter registration flow includes a one-time
+  disclosure: "You may be drawn for original or appeal cases.
+  You will not always know which. Your verdict counts the same
+  in both."
+
+### 2. Salt persistence (commit-reveal danger)
+
+When the arbiter submits a commit, the form generates a random
+salt locally. **If the salt is lost before the reveal phase, the
+arbiter cannot reveal and will be slashed.**
+
+- Persist the salt in `localStorage` keyed by `(caseId, address)`
+  the moment the commit is submitted.
+- Show a "Save your salt" UI if the arbiter is on a device they
+  might lose (e.g., a "download recovery file" button — a JSON
+  with caseId + salt + percentage).
+- On the reveal screen, surface the saved salt prefilled in the
+  form. If localStorage is empty (different device), surface
+  "Paste your saved recovery file" as a fallback.
+- Make this dangerous-looking enough that users actually save the
+  recovery info. A small banner in amber: "If you lose your
+  device or clear browser storage before revealing, you cannot
+  reveal this vote and will be slashed. Download recovery file."
+
+### 3. Deadline urgency
+
+Time matters in this system. Surface it loudly:
+
+- Countdown timers next to any deadline ("Reveal in 4h 32m").
+- Color escalation: zinc → amber (last 25%) → red (last 5%).
+- Email / push notifications are out of scope for v1; the user
+  needs to come back to the page proactively.
+- Don't auto-extend or auto-finalize on behalf of the user — the
+  contract handles those mechanics.
+
+### 4. Encryption setup gating
+
+An arbiter without an encryption key configured cannot decrypt
+briefs, which means they can't do their job. The UI should:
+
+- Surface an unmissable banner on My queue if encryption isn't
+  configured.
+- Let arbiters set up encryption proactively from their profile.
+- Block the commit/reveal form for cases with encrypted briefs
+  the arbiter can't decrypt — show "Configure encryption to
+  read this brief" instead of letting them blind-vote.
+
+### 5. Verdict-as-percentage clarity
+
+Verdicts are 0–100% to partyA. This is a non-trivial mental
+model. The UI should always render the percentage with both
+parties' shares visible:
+
+- "60 / 40" rather than "60"
+- "60% to Alice, 40% to Bob" with party identities.
+- Sliders (if used in the commit form) labeled at both ends:
+  "All to Alice ← → All to Bob".
+
+Avoid "for / against" framing — there is no party that's
+"correct." It's a split.
+
+### 6. Appeal button availability (D12)
+
+The appeal button is only shown to the appealing-eligible party:
+
+- Verdict 100% → only partyB sees an appeal button (partyA
+  fully won).
+- Verdict 0% → only partyA sees an appeal button.
+- Verdict 1–99% → both parties see it (compromise).
+
+If a fully-winning party tries to view their case, the appeal
+section is suppressed entirely (don't even render a grayed-out
+button — that's a confusing affordance).
+
+## Component inventory
+
+Existing components in `components/`:
+
+| Component | Purpose | Notes |
+|---|---|---|
+| `site-nav.tsx` | Top navigation | Stable; minor refresh ok |
+| `sign-in-button.tsx` | SIWE auth | Three states per above |
+| `case-status-badge.tsx` | State pill | Update for new CaseState enum + de novo |
+| `case-timeline.tsx` | Event log | **Hide for arbiters** per de novo |
+| `brief-editor.tsx` | Party brief input | Already supports encrypted |
+| `encrypted-brief-viewer.tsx` | Decrypt + display | Used by arbiters |
+| `evidence-panel.tsx` | File / IPFS attachments | Stable |
+| `commit-reveal-form.tsx` | Arbiter vote | **Strip appeal labels** |
+| `appeal-button.tsx` | Party appeal trigger | Update fee-token + D12 gate |
+| `configure-encryption.tsx` | Key setup | Extend to parties (or not — see invariants) |
+| `admin-failure-row.tsx` | Failure log row | Stable |
+
+Components likely to add:
+
+- `countdown.tsx` — reusable deadline countdown with color
+  escalation (zinc → amber → red).
+- `salt-recovery-prompt.tsx` — the download-recovery-file UI for
+  commit-reveal safety.
+- `claim-button.tsx` — generic pull-claim trigger for any
+  (address, token) pair (used by arbiters AND parties under D1(c)).
+- `health-tile.tsx` — admin dashboard health indicator.
+
+## Open design questions
+
+For the designer + PM to resolve before implementation:
+
+1. **Post-resolution arbiter identity exposure**: when a case is
+   resolved, do we show which arbiter handled it on the public
+   case page? D13 covers in-flight anonymity; post-resolution is
+   ambiguous. Lean toward NO (preserves long-term anonymity);
+   PM call.
+
+2. **Encryption keys for parties**: do parties register
+   encryption keys too (so verdicts could be encrypted to them)?
+   The redesign doc rejected this for v1 — parties don't need
+   keys because verdicts go on-chain plaintext. Confirm.
+
+3. **Per-arbiter verdict history**: per D13, suppressed on
+   public arbiter profiles. But what about the arbiter's *own*
+   profile (signed-in self view)? Probably show — arbiters can
+   see what they've done. Confirm.
+
+4. **Recuse confirmation**: should `recuse()` require a "are you
+   sure?" modal? Yes — irreversible action that loses the case
+   slot. Recommend a 2-step confirm.
+
+5. **Mobile scope**: the redesign-doc prep work assumed desktop
+   primary. Confirm what's required for mobile in v1.
+
+6. **Brand mark / logo**: a wordmark exists in nav ("Aegis").
+   Designer to decide if a mark / icon is needed for the favicon
+   and OG image, or if just the wordmark suffices.
