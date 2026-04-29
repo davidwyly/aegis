@@ -695,8 +695,72 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
         emit ArbiterDrawn(caseId, drawn);
     }
 
-    function recuse(bytes32 /*caseId*/) external nonReentrant {
-        revert NotImplemented();
+    /// @notice Voluntarily step down from a case before committing.
+    /// Releases the arbiter's stake lock without slashing (they did
+    /// nothing wrong) and synchronously draws a replacement using a
+    /// prevrandao-derived seed. Allowed only during the commit phase
+    /// and only if the arbiter hasn't yet committed — once committed,
+    /// stepping down would let them dodge slashing.
+    ///
+    /// Synchronous redraw via prevrandao is acceptable because the
+    /// recuser has no a-priori preference over which replacement is
+    /// drawn (they're leaving voluntarily; the replacement is random
+    /// from the eligible pool).
+    function recuse(bytes32 caseId) external nonReentrant {
+        Case storage c = _cases[caseId];
+        if (c.state != CaseState.Voting) revert CaseNotInVotingState();
+
+        address recuser = msg.sender;
+        Policy memory p = policy;
+        uint96 stake = uint96(p.stakeRequirement);
+
+        // Original-slot recusal.
+        if (recuser == c.originalArbiter && !c.originalRevealed) {
+            if (block.timestamp >= c.originalCommitDeadline) revert CommitWindowClosed();
+            if (c.originalCommitHash != bytes32(0)) revert CannotRecuseAfterCommit();
+
+            _releaseLock(recuser, stake);
+
+            address[] memory exclude = new address[](1);
+            exclude[0] = recuser;
+            uint256 seed = uint256(keccak256(abi.encode(block.prevrandao, caseId, recuser)));
+            address replacement = _drawArbiter(seed, c.partyA, c.partyB, exclude);
+
+            arbiters[replacement].caseCount += 1;
+            lockedStake[replacement] += stake;
+            lastArbitratedAt[_partyPairKey(c.partyA, c.partyB)][replacement] = uint64(block.timestamp);
+            c.originalArbiter = replacement;
+
+            emit Recused(caseId, recuser, replacement);
+            emit ArbiterRedrawn(caseId, recuser, replacement);
+            return;
+        }
+
+        // Appeal-slot recusal.
+        uint8 slotIdx = _findAppealSlotIndex(c, recuser);
+        if (slotIdx == type(uint8).max) revert NotAssignedArbiter();
+        if (block.timestamp >= c.appealCommitDeadline) revert CommitWindowClosed();
+
+        AppealSlot storage slot = c.appealSlots[slotIdx];
+        if (slot.commitHash != bytes32(0)) revert CannotRecuseAfterCommit();
+
+        _releaseLock(recuser, stake);
+
+        address[] memory exc = new address[](3);
+        exc[0] = c.originalArbiter;
+        exc[1] = c.appealSlots[1 - slotIdx].arbiter;
+        exc[2] = recuser;
+
+        uint256 seed2 = uint256(keccak256(abi.encode(block.prevrandao, caseId, recuser)));
+        address replacement2 = _drawArbiter(seed2, c.partyA, c.partyB, exc);
+
+        arbiters[replacement2].caseCount += 1;
+        lockedStake[replacement2] += stake;
+        lastArbitratedAt[_partyPairKey(c.partyA, c.partyB)][replacement2] = uint64(block.timestamp);
+        slot.arbiter = replacement2;
+
+        emit Recused(caseId, recuser, replacement2);
+        emit ArbiterRedrawn(caseId, recuser, replacement2);
     }
 
     /// @notice Submit the keccak commitment for this arbiter's vote.
@@ -1302,20 +1366,111 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
     }
 
     // ============================================================
-    // View helpers (Phase 2.3 rewrites getCase / getCommit against
-    // the new Case struct)
+    // View helpers
     // ============================================================
 
-    function getCase(bytes32 /*caseId*/) external pure returns (bool) {
-        revert NotImplemented();
+    /// @notice Flat view of a case. The de novo soft-anonymity property
+    /// is enforced UI-side — the contract exposes everything since
+    /// chain data is public anyway. Callers (UIs) decide what to surface.
+    struct CaseView {
+        address escrow;
+        bytes32 escrowCaseId;
+        address partyA;
+        address partyB;
+        address feeToken;
+        uint256 amount;
+        CaseState state;
+        uint8 stallRound;
+        uint64 openedAt;
+        address originalArbiter;
+        bytes32 originalCommitHash;
+        uint16 originalPercentage;
+        bytes32 originalDigest;
+        uint64 originalCommitDeadline;
+        uint64 originalRevealDeadline;
+        bool originalRevealed;
+        address appellant;
+        uint64 appealDeadline;
+        uint64 appealCommitDeadline;
+        uint64 appealRevealDeadline;
+        uint256 appealFeeAmount;
+        uint256 escrowFeeReceived;
+        bool feesDistributed;
     }
 
-    function getCommit(bytes32 /*caseId*/, address /*arbiter*/)
+    function getCase(bytes32 caseId) external view returns (CaseView memory) {
+        Case storage c = _cases[caseId];
+        return CaseView({
+            escrow: c.escrow,
+            escrowCaseId: c.escrowCaseId,
+            partyA: c.partyA,
+            partyB: c.partyB,
+            feeToken: c.feeToken,
+            amount: c.amount,
+            state: c.state,
+            stallRound: c.stallRound,
+            openedAt: c.openedAt,
+            originalArbiter: c.originalArbiter,
+            originalCommitHash: c.originalCommitHash,
+            originalPercentage: c.originalPercentage,
+            originalDigest: c.originalDigest,
+            originalCommitDeadline: c.originalCommitDeadline,
+            originalRevealDeadline: c.originalRevealDeadline,
+            originalRevealed: c.originalRevealed,
+            appellant: c.appellant,
+            appealDeadline: c.appealDeadline,
+            appealCommitDeadline: c.appealCommitDeadline,
+            appealRevealDeadline: c.appealRevealDeadline,
+            appealFeeAmount: c.appealFeeAmount,
+            escrowFeeReceived: c.escrowFeeReceived,
+            feesDistributed: c.feesDistributed
+        });
+    }
+
+    /// @notice Read one of the two appeal slots. Returns the zero
+    /// AppealSlot if the case isn't in the appeal phase yet.
+    function getAppealSlot(bytes32 caseId, uint8 idx) external view returns (AppealSlot memory) {
+        require(idx < 2, "idx out of range");
+        return _cases[caseId].appealSlots[idx];
+    }
+
+    /// @notice Read an arbiter's per-case commit status. Routes by
+    /// arbiter address to either the original slot or one of the two
+    /// appeal slots. Returns a zero CommitView if the arbiter isn't
+    /// assigned to this case.
+    struct CommitView {
+        bytes32 hash;
+        bool revealed;
+        uint16 partyAPercentage;
+        bytes32 rationaleDigest;
+    }
+
+    function getCommit(bytes32 caseId, address arbiter)
         external
-        pure
-        returns (bool)
+        view
+        returns (CommitView memory)
     {
-        revert NotImplemented();
+        Case storage c = _cases[caseId];
+        if (arbiter == c.originalArbiter) {
+            return CommitView({
+                hash: c.originalCommitHash,
+                revealed: c.originalRevealed,
+                partyAPercentage: c.originalPercentage,
+                rationaleDigest: c.originalDigest
+            });
+        }
+        for (uint8 i = 0; i < 2; ++i) {
+            AppealSlot storage s = c.appealSlots[i];
+            if (arbiter == s.arbiter && s.arbiter != address(0)) {
+                return CommitView({
+                    hash: s.commitHash,
+                    revealed: s.revealed,
+                    partyAPercentage: s.partyAPercentage,
+                    rationaleDigest: s.rationaleDigest
+                });
+            }
+        }
+        return CommitView({hash: bytes32(0), revealed: false, partyAPercentage: 0, rationaleDigest: bytes32(0)});
     }
 
     /// @notice Compute the commit-reveal hash off-chain. Must match what
