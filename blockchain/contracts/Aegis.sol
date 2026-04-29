@@ -78,6 +78,28 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
     uint16 public constant BPS_DENOMINATOR = 10_000;
     uint16 public constant DEFAULT_PERCENTAGE = 50; // 50/50 fallback
 
+    /// @notice Cap on per-arbiter fee bps (H-01 audit fix). Anything
+    /// over this could leave arbiters silently unpaid because the
+    /// pot can't satisfy the per-arbiter requirement; cap to keep
+    /// total arbiter pay (per-arbiter × 3) well within 7.5% of the
+    /// disputed amount.
+    uint16 public constant MAX_PER_ARBITER_FEE_BPS = 1000; // 10%
+    /// @notice Cap on appeal fee bps (H-01). Same reasoning.
+    uint16 public constant MAX_APPEAL_FEE_BPS = 1000; // 10%
+
+    /// @notice Lower / upper bounds on policy windows (L-03). Defense
+    /// in depth against governance setting unusable values.
+    uint64 public constant MIN_COMMIT_REVEAL_WINDOW = 1 hours;
+    uint64 public constant MAX_COMMIT_REVEAL_WINDOW = 30 days;
+    uint64 public constant MIN_APPEAL_WINDOW = 1 days;
+    uint64 public constant MAX_APPEAL_WINDOW = 30 days;
+    uint64 public constant MAX_REPEAT_COOLDOWN = 5 * 365 days;
+
+    /// @notice Hard cap on `_arbiterList.length` (M-03). Keeps the
+    /// O(N) iteration in `_eligibleArbiterCount` / `_drawArbiter`
+    /// bounded so VRF callbacks don't run out of gas.
+    uint256 public constant MAX_ARBITER_ROSTER = 500;
+
     /// @dev Stake is denominated in ELCP. Held by this contract.
     IERC20 public immutable stakeToken;
 
@@ -374,6 +396,8 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
     error CaseNotInVotingState();
     error NotAssignedArbiter();
     error FullWinnerCannotAppeal();
+    error RosterFull();
+    error LockUnderflow();
     error NotImplemented();
 
     // ============================================================
@@ -409,10 +433,25 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
     }
 
     function _validatePolicy(Policy memory p) internal pure {
-        if (p.commitWindow == 0 || p.revealWindow == 0) revert InvalidPolicy();
-        if (p.appealWindow == 0) revert InvalidPolicy();
-        if (p.appealFeeBps > BPS_DENOMINATOR) revert InvalidPolicy();
-        if (p.perArbiterFeeBps > BPS_DENOMINATOR) revert InvalidPolicy();
+        // Window bounds (L-03): defense in depth against governance
+        // setting unusable values (e.g. 1-second commit window).
+        if (p.commitWindow < MIN_COMMIT_REVEAL_WINDOW || p.commitWindow > MAX_COMMIT_REVEAL_WINDOW) {
+            revert InvalidPolicy();
+        }
+        if (p.revealWindow < MIN_COMMIT_REVEAL_WINDOW || p.revealWindow > MAX_COMMIT_REVEAL_WINDOW) {
+            revert InvalidPolicy();
+        }
+        if (p.appealWindow < MIN_APPEAL_WINDOW || p.appealWindow > MAX_APPEAL_WINDOW) {
+            revert InvalidPolicy();
+        }
+        if (p.repeatArbiterCooldown > MAX_REPEAT_COOLDOWN) revert InvalidPolicy();
+
+        // Fee bps caps (H-01): keep arbiter pay bounded so the pot
+        // distribution invariant (paidToArbiters ≤ totalPot) is
+        // structurally satisfied even under extreme policy values.
+        if (p.appealFeeBps > MAX_APPEAL_FEE_BPS) revert InvalidPolicy();
+        if (p.perArbiterFeeBps > MAX_PER_ARBITER_FEE_BPS) revert InvalidPolicy();
+
         if (p.treasury == address(0)) revert InvalidPolicy();
     }
 
@@ -425,6 +464,9 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
         onlyRole(GOVERNANCE_ROLE)
     {
         if (arbiter == address(0)) revert ZeroAddress();
+        // M-03: cap roster size so VRF callback gas stays bounded.
+        // Governance can revoke + register to rotate seats.
+        if (_arbiterList.length >= MAX_ARBITER_ROSTER) revert RosterFull();
         Arbiter storage a = arbiters[arbiter];
         if (a.active) revert AlreadyActive();
 
@@ -1101,23 +1143,30 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
 
     /// @dev Release `amount` from the arbiter's stake lock without
     /// touching their stakedAmount. Used on the success path.
+    /// L-01: strict — reverts on accounting drift instead of silently
+    /// snapping to zero, which would let the arbiter unstake bonded
+    /// stake on a subsequent call.
     function _releaseLock(address arbiter, uint96 amount) internal {
         uint96 cur = lockedStake[arbiter];
-        lockedStake[arbiter] = cur > amount ? cur - amount : 0;
+        if (cur < amount) revert LockUnderflow();
+        lockedStake[arbiter] = cur - amount;
     }
 
     /// @dev Slash `amount` ELCP from the arbiter's stakedAmount and
     /// release their lock for this case. Slashed amount → treasury in
     /// the stake token. Used on non-reveal paths.
+    ///
+    /// stakedAmount is capped at the arbiter's actual balance — if
+    /// they were already partially slashed elsewhere we slash what's
+    /// available without reverting. The lock release uses the strict
+    /// _releaseLock helper (L-01) so accounting drift is loud.
     function _slashArbiter(address arbiter, uint256 amount, bytes32 caseId) internal {
         Arbiter storage a = arbiters[arbiter];
         uint96 slash = uint96(amount);
         if (slash > a.stakedAmount) slash = a.stakedAmount;
         a.stakedAmount -= slash;
 
-        uint96 cur = lockedStake[arbiter];
-        uint96 release = uint96(amount);
-        lockedStake[arbiter] = cur > release ? cur - release : 0;
+        _releaseLock(arbiter, uint96(amount));
 
         if (slash > 0) {
             treasuryAccrued[address(stakeToken)] += slash;
@@ -1143,10 +1192,8 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
         uint256 received = balAfter - balBefore;
         c.escrowFeeReceived = received;
 
-        // Release the original arbiter's stake lock.
-        uint96 release = uint96(policy.stakeRequirement);
-        uint96 cur = lockedStake[arbiter];
-        lockedStake[arbiter] = cur > release ? cur - release : 0;
+        // Release the original arbiter's stake lock (strict via L-01).
+        _releaseLock(arbiter, uint96(policy.stakeRequirement));
 
         // Distribute the 5% pot per D1(c): half to arbiter,
         // half rebated to parties pro-rata by verdict.
