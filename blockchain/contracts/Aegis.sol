@@ -629,10 +629,42 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
         }
 
         if (c.state == CaseState.AwaitingAppealPanel) {
-            revert NotImplemented(); // Phase 4
+            _drawAppealPanel(c, caseId, randomWords[0]);
+            return;
         }
 
         revert CaseNotAwaitingPanel();
+    }
+
+    /// @dev Draw 2 appeal arbiters via VRF, excluding the original.
+    /// Each gets stakeRequirement locked, caseCount bumped, and the
+    /// D13 cooldown timestamp set. Sets the appeal commit + reveal
+    /// deadlines. State → Voting (same name as the original phase
+    /// per de novo review). Emits one ArbiterDrawn per slot.
+    function _drawAppealPanel(Case storage c, bytes32 caseId, uint256 seed) internal {
+        (address first, address second) = _drawTwoArbiters(
+            seed, c.partyA, c.partyB, c.originalArbiter
+        );
+
+        Policy memory p = policy;
+        bytes32 pairKey = _partyPairKey(c.partyA, c.partyB);
+        uint64 nowTs = uint64(block.timestamp);
+
+        arbiters[first].caseCount += 1;
+        arbiters[second].caseCount += 1;
+        lockedStake[first] += uint96(p.stakeRequirement);
+        lockedStake[second] += uint96(p.stakeRequirement);
+        lastArbitratedAt[pairKey][first] = nowTs;
+        lastArbitratedAt[pairKey][second] = nowTs;
+
+        c.appealSlots[0].arbiter = first;
+        c.appealSlots[1].arbiter = second;
+        c.appealCommitDeadline = nowTs + p.commitWindow;
+        c.appealRevealDeadline = nowTs + p.commitWindow + p.revealWindow;
+        c.state = CaseState.Voting;
+
+        emit ArbiterDrawn(caseId, first);
+        emit ArbiterDrawn(caseId, second);
     }
 
     /// @dev Draw the original arbiter, lock stake, set deadlines,
