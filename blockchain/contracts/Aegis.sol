@@ -716,7 +716,13 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
             return;
         }
 
-        revert NotImplemented(); // Phase 4: appeal-slot commit
+        uint8 slotIdx = _findAppealSlotIndex(c, msg.sender);
+        if (slotIdx == type(uint8).max) revert NotAssignedArbiter();
+        if (block.timestamp >= c.appealCommitDeadline) revert CommitWindowClosed();
+        AppealSlot storage slot = c.appealSlots[slotIdx];
+        if (slot.commitHash != bytes32(0)) revert AlreadyCommitted();
+        slot.commitHash = commitHash;
+        emit Committed(caseId, msg.sender, commitHash);
     }
 
     /// @notice Reveal the vote that was previously committed. The
@@ -754,7 +760,35 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
             return;
         }
 
-        revert NotImplemented(); // Phase 4: appeal-slot reveal
+        uint8 slotIdx = _findAppealSlotIndex(c, msg.sender);
+        if (slotIdx == type(uint8).max) revert NotAssignedArbiter();
+        if (block.timestamp < c.appealCommitDeadline) revert CommitWindowOpen();
+        if (block.timestamp >= c.appealRevealDeadline) revert RevealWindowClosed();
+
+        AppealSlot storage slot = c.appealSlots[slotIdx];
+        if (slot.commitHash == bytes32(0)) revert NoCommit();
+        if (slot.revealed) revert AlreadyRevealed();
+
+        bytes32 expectedAppeal = keccak256(abi.encode(
+            msg.sender, caseId, partyAPercentage, salt, rationaleDigest
+        ));
+        if (expectedAppeal != slot.commitHash) revert CommitMismatch();
+
+        slot.partyAPercentage = partyAPercentage;
+        slot.rationaleDigest = rationaleDigest;
+        slot.revealed = true;
+
+        emit Revealed(caseId, msg.sender, partyAPercentage, rationaleDigest);
+        // State stays Voting; finalize() computes median once both
+        // reveal or the reveal window closes.
+    }
+
+    /// @dev Returns 0 or 1 if `arbiter` fills that appeal slot, else
+    /// type(uint8).max as a not-found sentinel. Cheap — only 2 slots.
+    function _findAppealSlotIndex(Case storage c, address arbiter) internal view returns (uint8) {
+        if (c.appealSlots[0].arbiter == arbiter) return 0;
+        if (c.appealSlots[1].arbiter == arbiter) return 1;
+        return type(uint8).max;
     }
 
     /// @notice Push a resolved case to the underlying escrow, capture
