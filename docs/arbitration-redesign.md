@@ -681,9 +681,30 @@ Roughly **3.5–4 working days** of focused work assuming no surprises.
 The contract phases (2–5) are where most of the risk lives; the UI
 and keeper phases are mostly mechanical translation.
 
+## Decisions log
+
+Locked-in decisions from spec-freeze (Phase 0):
+
+| ID | Decision |
+|---|---|
+| D1 | No-appeal pot: 2.5% to arbiter + 2.5% returned to parties proportional to verdict (verdict-weighted rebate) |
+| D2 | Appeal fee always consumed (no refund on resolution) |
+| D3 | E4 stall: round-0 redraws both appeal arbiters; round-1 fallback applies original verdict + refunds appellant from the held escrow fee |
+| D4 | 0% treasury cut on the 7.5% appeal pot |
+| D5 | E3 (one appeal arbiter fails): median-of-2 (orig + revealing arbiter), no redraw |
+| D6 | Median-of-2 tie-break: `floor((a+b)/2)` |
+| D7 | Commit window: 24 hours |
+| D8 | Reveal window: 24 hours |
+| D9 | Appeal window: 7 days |
+| D10 | Default verdict on full stall: 50/50 |
+| D11 | Original arbiter's vote anchored at original-reveal time; not slashed on overturn |
+| D12 | Appeal eligibility: only the loser of the original verdict can appeal; "loser" = anyone with `< 100%` in their favor (so compromise verdicts are appealable by either party) |
+| D13 | Repeat-arbiter exclusion: 90-day cooldown between same-parties cases; soft anonymity via UI (on-chain queryable, not surfaced in arbiter or public UI) |
+| D14 | Naming: keep "arbiter" everywhere |
+| D15 | Branch: new branch off `main` (not the current frontend-review branch) |
+| D16 | Rollout: hard cutover, no V1/V2 shims (pre-mainnet) |
+| Blindness | De novo review + UX hiding (no encryption, no commit-before-peek). Appeal arbiters don't know they're on appeals. |
+
 ## Open questions still on the table
 
-1. **No-appeal payout to original arbiter.** Option A (2.5% +
-   treasury) vs Option B (full 5% to arbiter).
-2. **Appeal-fee refund mechanics.** Always consumed vs threshold
-   refund vs proportional refund.
+None — spec is frozen. Ready for Phase 1.
