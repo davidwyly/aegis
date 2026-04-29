@@ -70,3 +70,121 @@ out of place in a courtroom context.
 Designer should treat these as the seed; expand the kit only when
 truly needed (don't introduce a fifth button variant unless you can
 explain the semantic difference).
+
+## Information architecture
+
+```mermaid
+flowchart TD
+    Home[/"Home (/)"/]
+    Cases[/"Cases ledger (/cases)"/]
+    CaseView[/"Case workspace (/cases/[id])"/]
+    Queue[/"My queue (/queue)"/]
+    Arbiters[/"Arbiters roster (/arbiters)"/]
+    ArbiterProfile[/"Arbiter profile (/arbiters/[address])"/]
+    Governance[/"Governance (/governance)"/]
+    Admin[/"Ops dashboard (/admin)"/]
+    Failures[/"Keeper failures (/admin/failures)"/]
+
+    Home --> Cases
+    Home --> Arbiters
+    Home --> Governance
+    Cases --> CaseView
+    Queue --> CaseView
+    Arbiters --> ArbiterProfile
+    Admin --> Failures
+```
+
+### Auth-gated routes
+
+- **Public** (no wallet required): Home, Cases ledger, Arbiters
+  roster, Governance proposal builder (read), Case workspace
+  (party identities + briefs visible only post-resolution).
+- **SIWE-required**: My queue, Case workspace party-side actions
+  (file brief, request appeal), arbiter actions (commit, reveal,
+  recuse), arbiter profile encryption setup.
+- **Role-gated within auth**: Arbiter actions only render when the
+  signed-in wallet is on the case's panel; admin pages may be
+  unrestricted-read but the underlying RPC keys live elsewhere.
+
+### Top nav
+
+A single bar across the top with: wordmark · Cases · My queue ·
+Arbiters · Governance · Ops (muted) · SIWE sign-in button on the
+right. Already implemented; designer should treat it as canonical
+and not invent additional global nav.
+
+## User roles and contexts
+
+Aegis has more user types than a typical dapp. The same wallet may
+be in multiple roles across different cases. **Each screen needs to
+render correctly for whichever role the viewer currently holds for
+the resource they're looking at.**
+
+### Visitor (no wallet, or signed-out)
+
+- Reads the public ledger of cases.
+- Sees post-resolution data (verdict, parties, fee distribution).
+- **Cannot see** arbiter identities for in-flight cases (D13
+  anonymity), in-flight briefs, or commit hashes that haven't been
+  revealed.
+
+### Party (plaintiff / defendant)
+
+A party is one of `partyA` or `partyB` on a specific case. They've
+already gone through Vaultra's escrow setup (or another integrated
+escrow) and are now in dispute.
+
+- Files briefs (encrypted off-chain to arbiters).
+- Watches the case progress through states.
+- Decides whether to appeal (D12 gate: only if they didn't fully win).
+- Claims any verdict-weighted rebate (D1(c)).
+
+A party knows full context of their own case. Their UI shows
+everything: state, deadlines, original verdict (after reveal),
+appeal status, etc.
+
+### Arbiter
+
+An arbiter is a registered, ELCP-staked wallet. They may be drawn
+for a case via VRF (1 arbiter for original, or 1 of 2 for appeal).
+
+**Critical UX requirement (de novo)**: an arbiter's UI must NOT
+distinguish between original and appeal cases when they're drawn.
+They see "a case to arbitrate" — same shape, same fields, same
+flow. They commit + reveal a vote. They never see whether a prior
+verdict exists for this case, who other arbiters are, or that
+they're contributing to a median rather than rendering solo. See
+the "Critical UX invariants" section below for the enforcement
+checklist.
+
+When an arbiter is NOT acting as an arbiter — e.g., they're
+viewing the public ledger or their own profile — they see normal
+public information.
+
+### Governance member (DAO)
+
+A member of the Eclipse DAO's multisig. They use the governance
+calldata builder to compose policy / roster proposals that go to
+the DAO timelock.
+
+This is a power-user flow. Visual design can be denser and more
+technical than the party / arbiter views.
+
+### Admin / operator
+
+Whoever runs the keeper / monitors the system. Reads the ops
+dashboard for keeper liveness, VRF stuck cases, indexer cursor
+lag, and the failure log. Read-only UI; remediation happens
+out-of-band (top up VRF subscription, restart keeper, etc.).
+
+### Same-wallet, multi-role example
+
+Wallet `0xAlice` could simultaneously be:
+- A party in case #42 (her dispute with Bob)
+- An arbiter for case #71 (a different dispute she was drawn into)
+- A DAO multisig signer (when wearing her governance hat)
+
+The UI must contextualize correctly: when Alice opens case #71's
+workspace, she sees the arbiter UX (de novo sanitized). When she
+opens case #42's workspace, she sees the party UX. The route is
+the same; the rendering branches on role detection.
