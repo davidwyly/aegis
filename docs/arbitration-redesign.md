@@ -339,6 +339,230 @@ always the middle value — a single integer, no ties. With 2 votes
 | E9 | Double-finalize | State guard reverts (no change) |
 | E10 | Tie median | Deterministic floor((a+b)/2) for 2-vote fallback |
 
+## Storage layout impact
+
+This is the contract-side change list, scoped to `blockchain/contracts/Aegis.sol`.
+
+### Case struct
+
+The current `Case` struct is panel-shaped (variable-size arrays for
+panel members and votes). The new struct is fixed-shape with a clear
+"original" slot and an optional "appeal" extension.
+
+```text
+Case {
+    // Identity (unchanged)
+    address escrow;
+    bytes32 escrowCaseId;
+    address partyA;
+    address partyB;
+    address feeToken;
+    uint256 amount;
+
+    // State (replaces panel arrays)
+    address originalArbiter;
+    bytes32 originalCommit;
+    uint16  originalPercentage;   // 0-100, valid after reveal
+    bytes32 originalDigest;
+    uint64  originalCommitDeadline;
+    uint64  originalRevealDeadline;
+    bool    originalRevealed;
+
+    // Appeal extension (zero unless appeal filed)
+    address appellant;
+    uint64  appealDeadline;       // appeal-window expiry
+    address[2] appealArbiters;
+    bytes32[2] appealCommits;
+    uint16[2]  appealPercentages;
+    bytes32[2] appealDigests;
+    bool[2]    appealRevealed;
+    uint64  appealCommitDeadline;
+    uint64  appealRevealDeadline;
+    uint256 appealFeeAmount;      // for refund accounting
+
+    // Pot accounting (replaces _distributeFees inputs)
+    uint256 escrowFeeReceived;    // 5% pot, set on applyArbitration return
+    bool    feesDistributed;
+
+    // State machine
+    CaseState state;
+    uint8 stallRound;             // 0 or 1 — same redraw cap as today
+}
+```
+
+Key deletions from the current struct: the `panel[]` / `commits[]` /
+`reveals[]` parallel arrays, the separate `Appeal` substruct, the
+`originalPercentage` / `originalDigest` fields used only for staging
+between original-resolution and appeal-finalization (those become the
+*real* fields).
+
+### Mapping changes
+
+- `liveCaseFor[escrow][escrowCaseId]` — unchanged.
+- `lockedStake[arbiter]` — unchanged. Locks one bond at original-draw
+  time, locks two more at appeal-draw time.
+- `claimable[arbiter][token]` — unchanged. Pull-pattern fee claims.
+- `treasuryAccrued[token]` — unchanged.
+
+### Function signatures
+
+| Current | New | Notes |
+|---|---|---|
+| `commitVote(caseId, hash)` | `commitVote(caseId, hash)` | Same signature, contract internally routes to original or appeal slot based on `state` and `msg.sender` |
+| `revealVote(caseId, %, salt, digest)` | unchanged | Same routing |
+| `requestAppeal(caseId)` | unchanged | Pulls 2.5% appeal fee in escrow's fee token, not ELCP |
+| `finalize(caseId)` | unchanged | Internal logic rewritten — no more upheld/overturned branching |
+| `_drawPanelWithSeed(seed, ..., n)` | split: `_drawArbiter(seed, exclude)` and `_drawTwoArbiters(seed, exclude)` | Single-shot Fisher-Yates with `n=1` or `n=2` |
+| `_resolveByMedian(panel, votes)` | `_medianOf3(a, b, c)` and `_medianOf2(a, b)` | Specialized; no sort needed for n=3 |
+| `_finalizeAppeal(...)` | **removed** | The appeal IS the finalization; no separate call |
+| `_settleOriginal(...)` | merged into `finalize` | Single resolution path |
+| `_distributeFees(...)` | rewritten | Pot is 5% (no appeal) or 7.5% (appeal); split at fixed 2.5% per arbiter |
+| `_stallAndRedraw(...)` | adapted for single-arbiter original | Round 0 redraws original; round 1 defaults to 50/50 |
+
+### Policy struct changes
+
+```text
+policy {
+    uint64  commitWindow;         // unchanged
+    uint64  revealWindow;         // unchanged
+    uint64  appealWindow;         // unchanged
+    uint256 stakeRequirement;     // unchanged
+    address treasury;             // unchanged
+
+-   uint8   panelSize;            // REMOVED — now always 1
+-   uint8   appealPanelSize;      // REMOVED — now always 2
+-   uint16  panelFeeBps;          // REMOVED — flat 2.5% per arbiter
+-   uint16  appealOverturnTolerance; // REMOVED — no upheld/overturned distinction
+-   uint256 appealBondAmount;     // REMOVED — replaced by appealFeeBps
++   uint16  appealFeeBps;         // 250 = 2.5% of disputed amount
++   uint16  noAppealOriginalBps;  // 500 (Option B) or 250 (Option A)
++   uint16  perArbiterFeeBps;     // 250 = 2.5% per arbiter on appealed cases
+}
+```
+
+The number of policy knobs **drops by 4** (panel sizes, fee bps,
+tolerance, bond) and gains 3, for a net reduction of 1. Governance
+proposals to "tune the panel" become unnecessary.
+
+### Events
+
+- `CaseRequested` — unchanged.
+- `CaseOpened` — change `address[] panel` to `address arbiter`.
+- `Committed` / `Revealed` — unchanged signatures; emitted for
+  original-arbiter or appeal-arbiter equivalently.
+- `CaseAppealable` — unchanged.
+- `AppealRequested` — change to emit `appealFeeAmount` in escrow fee
+  token instead of ELCP bond amount.
+- `CaseResolved` — unchanged signature; emitted exactly once per case
+  (no longer twice for staged-then-applied).
+- New: `OriginalArbiterDrawn(caseId, arbiter)`,
+  `AppealArbitersDrawn(caseId, [a, b])` for indexer clarity.
+
+## Implementation phases
+
+A realistic order of operations for the rewrite. Each phase ends in
+a green test suite for the slice it touches.
+
+### Phase 0 — Spec freeze (you, ~30min)
+
+Answer the two open questions in this doc:
+1. Option A or B for no-appeal payout.
+2. Always-consumed vs threshold-refund vs proportional-refund for
+   the appeal fee.
+
+Without these locked, phases 2 and 4 will need rework.
+
+### Phase 1 — Branch + scaffolding (~15min)
+
+```bash
+git checkout main
+git pull
+git checkout -b feat/single-arbiter-appeal-quorum
+```
+
+Move this design doc to the new branch's history (cherry-pick or
+merge from `claude/review-frontend-design-cR73L`).
+
+### Phase 2 — Contract storage + state machine (~half day)
+
+- Rewrite `Case` struct per the layout above.
+- Update `CaseState` enum to match the state diagram.
+- Stub all functions to compile but revert with `NotImplemented`.
+- Confirm `forge build` / `pnpm contracts:compile` is green.
+
+### Phase 3 — Original arbiter flow (~half day)
+
+- `openDispute` → VRF request.
+- `fulfillRandomWords` → `_drawArbiter` + state transition.
+- `commitVote` / `revealVote` for the original-arbiter slot.
+- `finalize` for the no-appeal path.
+- `applyArbitration` callback.
+- `_distributeFees` for the 5% no-appeal pot.
+
+Tests: a full happy-path no-appeal case.
+
+### Phase 4 — Appeal flow (~full day)
+
+- `requestAppeal` — pull appeal fee, gate on appeal window, request VRF.
+- `fulfillRandomWords` (appeal branch) — draw 2 excluding original.
+- `commitVote` / `revealVote` for appeal slots.
+- `finalize` for the appeal path — `_medianOf3`, fee distribution
+  across 7.5% pot.
+- Edge cases E3, E4, E10 from above.
+
+Tests: appeal happy-path, partial-reveal, full-non-reveal.
+
+### Phase 5 — Stall + redraw (~quarter day)
+
+- Two-round stall logic for the original arbiter (E1, E2).
+- Slashing of non-revealing original arbiters.
+- Slashing of non-revealing appeal arbiters with appellant refund
+  on full non-reveal (E4).
+
+Tests: stall-then-redraw and stall-then-default for both phases.
+
+### Phase 6 — ABI export + type regen (~30min)
+
+```bash
+pnpm contracts:export-abi
+pnpm typecheck
+```
+
+Fix all type errors in `app/`, `lib/keeper/`, `components/`. Most
+will be enum value changes and the `panel[]` → `arbiter` shift.
+
+### Phase 7 — Keeper updates (~half day)
+
+- New event handlers in `lib/keeper/aegis-indexer.ts` for
+  `OriginalArbiterDrawn`, `AppealArbitersDrawn`.
+- DB schema migration: rename `panel_*` columns to `arbiter_*` /
+  `appeal_arbiters_*` per the new model.
+- Auto-finalize logic for the simplified paths.
+
+### Phase 8 — Frontend updates (~full day)
+
+- `components/commit-reveal-form.tsx` — gate visibility of the
+  original verdict in the appeal-phase UI (commit-before-peek).
+- `components/case-timeline.tsx` — render single-arbiter then
+  appeal-augmentation.
+- `components/appeal-button.tsx` — show 2.5% appeal fee in the
+  escrow's token (not ELCP).
+- `app/cases/[id]/page.tsx` — strip panel-grid UI in favor of
+  arbiter-card UI.
+
+### Phase 9 — Security review pass (~half day)
+
+- Re-run `docs/security-review.md` checklist against the new code.
+- Add new findings for the commit-before-peek threat model and the
+  median-of-2 fallback.
+- Get external eyes before mainnet deploy.
+
+### Estimated total
+
+Roughly **3.5–4 working days** of focused work assuming no surprises.
+The contract phases (2–5) are where most of the risk lives; the UI
+and keeper phases are mostly mechanical translation.
+
 ## Open questions still on the table
 
 1. **No-appeal payout to original arbiter.** Option A (2.5% +
