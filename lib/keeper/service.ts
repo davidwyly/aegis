@@ -16,6 +16,8 @@ import { aegisAbi } from "@/lib/abi/aegis"
 import { vaultraAdapterAbi } from "@/lib/abi/vaultra-adapter"
 import { vaultraDisputeEventsAbi } from "@/lib/abi/vaultra-events"
 import { recordCaseOpened } from "@/lib/cases/service"
+
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as const
 import { indexAegisEvents, type AegisIndexerResult } from "./aegis-indexer"
 import { autoFinalizePending, type AutoFinalizeResult } from "./auto-finalize"
 import { recordFailure, markResolved } from "./failures"
@@ -220,44 +222,50 @@ export async function keeperTick(cfg: KeeperConfig): Promise<KeeperTickResult> {
       const openHash = await walletClient.writeContract(openReq)
       const receipt = await publicClient.waitForTransactionReceipt({ hash: openHash })
 
-      // Step 3: read the case + panel back from chain to fill the DB row.
+      // Step 3: read the case back from chain to fill the DB row. Under
+      // the new design getCase returns a CaseView struct (not a tuple)
+      // and there is no panel — a single original arbiter is drawn by
+      // the VRF callback and emitted via ArbiterDrawn separately.
       const c = (await publicClient.readContract({
         address: cfg.aegisAddress,
         abi: aegisAbi,
         functionName: "getCase",
         args: [aegisCaseId as Hex],
-      })) as readonly [
-        Address,
-        Hex,
-        Address,
-        Address,
-        Address,
-        bigint,
-        bigint,
-        bigint,
-        bigint,
-        number,
-        number,
-        number,
-        number,
-        number,
-      ]
-      const panel = (await publicClient.readContract({
-        address: cfg.aegisAddress,
-        abi: aegisAbi,
-        functionName: "getPanel",
-        args: [aegisCaseId as Hex],
-      })) as Address[]
-      const opened = {
-        partyA: c[2],
-        partyB: c[3],
-        feeToken: c[4],
-        amount: c[5],
-        deadlineCommit: new Date(Number(c[7]) * 1000),
-        deadlineReveal: new Date(Number(c[8]) * 1000),
-        panel,
+      })) as {
+        escrow: Address
+        escrowCaseId: Hex
+        partyA: Address
+        partyB: Address
+        feeToken: Address
+        amount: bigint
+        state: number
+        stallRound: number
+        openedAt: bigint
+        originalArbiter: Address
+        originalCommitHash: Hex
+        originalPercentage: number
+        originalDigest: Hex
+        originalCommitDeadline: bigint
+        originalRevealDeadline: bigint
+        originalRevealed: boolean
+        appellant: Address
+        appealDeadline: bigint
+        appealCommitDeadline: bigint
+        appealRevealDeadline: bigint
+        appealFeeAmount: bigint
+        escrowFeeReceived: bigint
+        feesDistributed: boolean
       }
       void receipt
+
+      // The original arbiter is populated by the VRF callback. If the
+      // callback hasn't fulfilled yet, originalArbiter is the zero
+      // address — recordCaseOpened tolerates an empty panel and the
+      // ArbiterDrawn event handler fills the panel later.
+      const arbiterPanel: { address: Address; seat: number }[] =
+        c.originalArbiter !== ZERO_ADDRESS
+          ? [{ address: c.originalArbiter, seat: 0 }]
+          : []
 
       await recordCaseOpened({
         chainId: cfg.chainId,
@@ -265,14 +273,14 @@ export async function keeperTick(cfg: KeeperConfig): Promise<KeeperTickResult> {
         caseId: aegisCaseId as Hex,
         escrowAddress: cfg.adapterAddress, // adapter is the IArbitrableEscrow Aegis sees
         escrowCaseId: expectedCaseId,
-        partyA: opened.partyA,
-        partyB: opened.partyB,
-        feeToken: opened.feeToken,
-        amount: opened.amount,
-        panelSize: opened.panel.length,
-        deadlineCommit: opened.deadlineCommit,
-        deadlineReveal: opened.deadlineReveal,
-        panel: opened.panel.map((address, seat) => ({ address, seat })),
+        partyA: c.partyA,
+        partyB: c.partyB,
+        feeToken: c.feeToken,
+        amount: c.amount,
+        panelSize: arbiterPanel.length,
+        deadlineCommit: new Date(Number(c.originalCommitDeadline) * 1000),
+        deadlineReveal: new Date(Number(c.originalRevealDeadline) * 1000),
+        panel: arbiterPanel,
       })
       casesOpened += 1
 
