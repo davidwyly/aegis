@@ -194,45 +194,119 @@ sequenceDiagram
     NewArbB->>Aegis: claim
 ```
 
-### Commit-before-peek protocol
+### Appeal blindness via de novo review
 
-The on-chain verdict is public the moment the original arbiter reveals.
-"Blind" appeal voting is therefore enforced by the *Aegis UI* + the
-non-reveal slashing penalty, not by cryptography.
+Appeal arbiters are not told they are on an appeal. From their UI,
+the case looks identical to a fresh original case: briefs, evidence,
+"render your verdict." They commit + reveal a vote without the
+framing or anchoring effect of "this is a review."
+
+In legal terms this is **de novo review** — the appeal panel
+renders an independent verdict without deference to the prior
+decision. In our protocol it maps directly onto the 2-of-3 quorum:
+the original arbiter's vote is anchored, the two new arbiters vote
+independently, the median is the final verdict.
 
 ```mermaid
 sequenceDiagram
     actor Arbiter
     participant UI as Aegis UI
     participant Aegis as Aegis (on-chain)
-    participant Chain as Block explorer
 
-    Note over Arbiter,Chain: Arbiter is drawn for the appeal panel.
-    Arbiter->>UI: open case
-    UI-->>Arbiter: shows briefs + evidence<br/>(original verdict HIDDEN)
+    Note over Arbiter: drawn for an appeal slot,<br/>but their UI doesn't say that
+    Arbiter->>UI: open case from queue
+    UI-->>Arbiter: briefs + evidence<br/>(no state badge,<br/>no event timeline,<br/>no "appeal" label)
     Arbiter->>UI: submit commit hash
     UI->>Aegis: commitVote(caseId, hash)
-    Aegis-->>UI: committed
-    Note over UI: only NOW does the UI<br/>reveal the original verdict
-    UI-->>Arbiter: shows original verdict (informational)
-    Arbiter->>Aegis: revealVote(caseId, %, salt, digest)
+    Note over Arbiter: time passes
+    Arbiter->>Aegis: revealVote
+    Note over Arbiter: arbiter never learned<br/>this was an appeal
 ```
 
-**Threat model**: a determined arbiter can read `c.partyAPercentage`
-directly from the contract via an explorer before committing. Defense:
+**Why this beats commit-before-peek and beats encryption.** Both of
+those defended only against passive curiosity. Encryption added
+significant party-side UX cost (key management, lost-key failures);
+commit-before-peek added a UI gate that a determined arbiter could
+trivially bypass via a block explorer. De novo + UX hiding achieves
+the same passive-curiosity defense with **zero crypto, zero key
+management, and no party-side burden**.
 
-1. **No incentive to peek-then-bail.** The arbiter's commit hash is
-   binding. If they peek and dislike their commit, refusing to reveal
-   costs them one `stakeRequirement` bond — typically more than they
-   could earn by gaming a single case.
-2. **Short commit window.** Set `commitWindow` short enough that a
-   peek-and-recompute attack window is small.
-3. **2-of-3 collusion barrier.** Even a peeking arbiter cannot swing
-   the median alone; their peer must also disagree with the original
-   in the same direction.
+**What this defends against**:
 
-The blinding is therefore "soft" by cryptographic standards but
-"hard" by economic standards. Acceptable.
+- Passive curiosity (arbiter wonders "what was the prior verdict?"
+  but has no way to find out — they don't even know there was one).
+- Anchoring bias (no framing as "you're reviewing someone's work").
+- The "appeal panel biased toward overturn" effect (not even a
+  concept they're aware of).
+
+**What this does *not* defend against** (same as encryption):
+
+- Active bribery via off-chain channel ("the bribing party tells
+  the bribed arbiter the prior verdict directly"). The 2-of-3
+  quorum is the defense here, not blindness.
+- Determined adversary reading the chain. A motivated arbiter who
+  queries their own assignment events can still detect they're on
+  an appeal. Hiding this on-chain is best-effort (see "On-chain
+  detectability" below).
+
+### Implementation requirements for de novo
+
+**1. Brief sanitization**: appeal arbiters see exactly the briefs
+and evidence the original arbiter saw — frozen at original-resolution
+time. **No new briefs are accepted on appeal.** Otherwise parties'
+appeal-time briefs would reference the prior verdict ("we appeal
+because the 30/70 ruling was wrong") and immediately leak the
+appeal context to the arbiter.
+
+This is a meaningful product decision: parties cannot make
+"appeal-specific arguments." If they want different arguments
+heard, they must surface them in the original case. The de novo
+framing is honest — appeal arbiters are judging the same case,
+not arguing against an unseen prior decision.
+
+**2. Arbiter UI sanitization**: during the commit phase, the
+arbiter's case workspace renders only briefs + evidence. Hidden
+elements:
+
+- Case state badge (no `OriginalCommit` / `AppealCommit` distinction).
+- Event timeline (no `Committed` / `Revealed` / `AppealRequested`
+  history).
+- "My queue" entries are undifferentiated — original and appeal
+  cases look the same.
+- No reference to "appeal," "panel," or "prior verdict" anywhere.
+
+**3. On-chain naming designed not to leak**:
+
+- Single `ArbiterDrawn(caseId, arbiter)` event (not separate
+  `OriginalArbiterDrawn` / `AppealArbitersDrawn`).
+- Single `Committed` and `Revealed` events for both phases.
+- Case state names that don't distinguish phase — e.g., a single
+  `Voting` state with an internal `roundNumber` field that's not
+  exposed in the standard view function.
+- The `Case` view returns no fields that obviously identify it as
+  in-appeal (no `appellant` or `appealRound` exposed in the
+  default getter; surface those only via a permissioned admin-only
+  function).
+
+A determined adversary using gas patterns, block timing, or careful
+RPC introspection can still detect appeal context. The goal is
+that the casual / honest-curious arbiter has nothing to discover.
+
+### Arbiter onboarding disclosure
+
+To avoid any "trickery" concern, the arbiter onboarding flow
+(`app/arbiters/[address]` registration) must include a clear
+disclosure:
+
+> Cases drawn from your queue may be original cases or appeal
+> augmentations. You will not always know which. Your verdict
+> contributes equally to the final outcome in both cases. By
+> registering, you consent to this aggregation mechanism.
+
+This makes the system **transparent about its structure, opaque
+about specifics** — the same property a jury system has (jurors
+know they're one of N, but don't know how the others vote until
+deliberation).
 
 ## Edge cases
 
