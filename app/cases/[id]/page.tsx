@@ -399,36 +399,42 @@ export default async function CaseDetailPage({
       )}
 
       {isParty && c.status === "appealable_resolved" && (() => {
-        const chain = getChainData(c.chainId)
-        const elcp = chain.elcp
-        if (!elcp) {
-          return (
-            <section className="card">
-              <h2 className="text-sm font-medium uppercase tracking-wide text-zinc-500">
-                Appeal verdict
-              </h2>
-              <p className="mt-1 text-sm text-zinc-500">
-                ELCP token address not configured for chain {c.chainId}.
-              </p>
-            </section>
-          )
-        }
+        // D12 — full winners cannot appeal. If the viewer's side fully
+        // won (100% to partyA when viewer is partyA, or 0% to partyA
+        // when viewer is partyB), suppress the appeal section entirely.
+        const pct = c.medianPercentage
+        const viewerIsPartyA =
+          viewer !== null && viewer.toLowerCase() === c.partyA.toLowerCase()
+        const viewerIsPartyB =
+          viewer !== null && viewer.toLowerCase() === c.partyB.toLowerCase()
+        if (pct === 100 && viewerIsPartyA) return null
+        if (pct === 0 && viewerIsPartyB) return null
+
+        // Compute the appeal fee from the disputed amount and
+        // policy.appealFeeBps (default 250 = 2.5% per D2). TODO: read
+        // policy() on-chain to honor governance-tuned values; for now
+        // the spec-frozen default is correct.
+        const APPEAL_FEE_BPS = 250n
+        const feeAmount = (BigInt(c.amount) * APPEAL_FEE_BPS) / 10000n
+
         return (
           <section className="card border-amber-300 dark:border-amber-700">
             <h2 className="text-sm font-medium uppercase tracking-wide text-zinc-500">
               Appeal verdict
             </h2>
             <p className="mt-1 text-xs text-zinc-500">
-              Original median: party A {c.medianPercentage ?? "?"} / 100. Verdict
-              applies automatically once the appeal window closes if no party
-              appeals.
+              Original verdict: {pct ?? "?"}% to party A, {100 - (pct ?? 0)}% to
+              party B. Verdict applies automatically once the appeal window
+              closes if no party appeals.
             </p>
             <div className="mt-3">
               <AppealButton
                 aegisAddress={c.aegisAddress as `0x${string}`}
                 caseId={c.caseId as `0x${string}`}
-                bondToken={elcp}
-                bondAmount={BigInt("100000000000000000000") * 2n /* placeholder; see policy */}
+                feeToken={c.feeToken as `0x${string}`}
+                feeAmount={feeAmount}
+                feeTokenSymbol="USDC"
+                feeTokenDecimals={6}
               />
             </div>
           </section>
