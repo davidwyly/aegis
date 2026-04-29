@@ -176,8 +176,15 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
         AppealableResolved, // original revealed; appeal window open
         AwaitingAppealPanel, // appeal requested; VRF for 2 new arbiters pending
         Resolved, // applyArbitration called; case closed
-        Defaulted // 50/50 fallback applied after stall round 1
+        Defaulted, // 50/50 fallback applied after stall round 1
+        Canceled // governance escape — VRF stuck (H-02 audit fix)
     }
+
+    /// @notice How long a case must sit in AwaitingArbiter or
+    /// AwaitingAppealPanel before governance can force-cancel it via
+    /// `forceCancelStuck`. Defense against a single VRF outage
+    /// permanently bricking cases (H-02 audit fix).
+    uint64 public constant STUCK_CASE_GRACE = 30 days;
 
     /// @notice One of two appeal-arbiter slots. Fixed-size to avoid
     /// dynamic-array gymnastics for a known-2 quorum extension.
@@ -322,6 +329,12 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
         bytes32 finalDigest
     );
     event CaseDefaultResolved(bytes32 indexed caseId, uint16 fallbackPercentage);
+
+    /// @notice Governance force-canceled a case stuck in AwaitingArbiter
+    /// or AwaitingAppealPanel for longer than STUCK_CASE_GRACE. The
+    /// underlying escrow is NOT settled — its own escape valve handles
+    /// fund release. Held appeal fee (if any) is refunded.
+    event CaseCanceled(bytes32 indexed caseId, uint256 appealFeeRefunded);
     event FeesAccrued(
         bytes32 indexed caseId,
         address feeToken,
@@ -398,6 +411,8 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
     error FullWinnerCannotAppeal();
     error RosterFull();
     error LockUnderflow();
+    error CaseNotStuck();
+    error CaseNotYetStuck();
     error NotImplemented();
 
     // ============================================================
@@ -535,6 +550,46 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
         treasuryAccrued[address(token)] = bal - amount;
         token.safeTransfer(to, amount);
         emit TreasuryWithdrawn(address(token), to, amount);
+    }
+
+    /// @notice Force-cancel a case stuck in `AwaitingArbiter` or
+    /// `AwaitingAppealPanel` for longer than STUCK_CASE_GRACE. Used
+    /// only when Chainlink VRF has failed to fulfill (LINK depleted,
+    /// coordinator outage, etc.). H-02 audit fix.
+    ///
+    /// Behavior:
+    ///   - Refunds any held appeal fee back to the appellant.
+    ///   - Clears `liveCaseFor` so the underlying escrow can reopen.
+    ///   - Transitions to `Canceled` (terminal). Does NOT call
+    ///     `applyArbitration` — the underlying escrow handles fund
+    ///     release via its own escape valve (e.g. Vaultra DAO rescue).
+    ///
+    /// No stake locks are held in these states (VRF callback is what
+    /// would lock them), so no release logic needed.
+    function forceCancelStuck(bytes32 caseId)
+        external
+        onlyRole(GOVERNANCE_ROLE)
+        nonReentrant
+    {
+        Case storage c = _cases[caseId];
+        if (c.state != CaseState.AwaitingArbiter && c.state != CaseState.AwaitingAppealPanel) {
+            revert CaseNotStuck();
+        }
+        if (block.timestamp < c.openedAt + STUCK_CASE_GRACE) revert CaseNotYetStuck();
+
+        // Refund the appellant's held appeal fee, if any. (Only set
+        // when state == AwaitingAppealPanel.)
+        uint256 refunded = 0;
+        if (c.appealFeeAmount > 0 && c.appellant != address(0)) {
+            refunded = c.appealFeeAmount;
+            claimable[c.appellant][c.feeToken] += refunded;
+            c.appealFeeAmount = 0;
+        }
+
+        delete liveCaseFor[c.escrow][c.escrowCaseId];
+        c.state = CaseState.Canceled;
+
+        emit CaseCanceled(caseId, refunded);
     }
 
     // ============================================================
@@ -933,7 +988,11 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
             return;
         }
 
-        if (c.state == CaseState.Resolved || c.state == CaseState.Defaulted) {
+        if (
+            c.state == CaseState.Resolved ||
+            c.state == CaseState.Defaulted ||
+            c.state == CaseState.Canceled
+        ) {
             revert CaseAlreadyFinalized();
         }
 

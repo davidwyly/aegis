@@ -223,6 +223,16 @@ export const aegisAbi = [
   },
   {
     "inputs": [],
+    "name": "CaseNotStuck",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "CaseNotYetStuck",
+    "type": "error"
+  },
+  {
+    "inputs": [],
     "name": "CasePaused",
     "type": "error"
   },
@@ -494,6 +504,25 @@ export const aegisAbi = [
       }
     ],
     "name": "ArbiterRevoked",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "bytes32",
+        "name": "caseId",
+        "type": "bytes32"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "appealFeeRefunded",
+        "type": "uint256"
+      }
+    ],
+    "name": "CaseCanceled",
     "type": "event"
   },
   {
@@ -1286,6 +1315,19 @@ export const aegisAbi = [
     "type": "function"
   },
   {
+    "inputs": [],
+    "name": "STUCK_CASE_GRACE",
+    "outputs": [
+      {
+        "internalType": "uint64",
+        "name": "",
+        "type": "uint64"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
     "inputs": [
       {
         "internalType": "address",
@@ -1388,6 +1430,19 @@ export const aegisAbi = [
       }
     ],
     "name": "finalize",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "caseId",
+        "type": "bytes32"
+      }
+    ],
+    "name": "forceCancelStuck",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"

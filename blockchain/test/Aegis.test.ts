@@ -1252,4 +1252,193 @@ describe("Aegis (single-arbiter + appeal-of-3)", () => {
       expect(c.appellant).to.equal(partyA.address)
     })
   })
+
+  // ============================================================
+  // H-02 audit fix — force-cancel a case stuck in VRF-pending state
+  // for longer than STUCK_CASE_GRACE. Governance-only escape hatch.
+  // ============================================================
+
+  describe("forceCancelStuck (H-02)", () => {
+    const STUCK_GRACE = 30 * 24 * 60 * 60
+
+    it("rejects calls before the grace period expires", async () => {
+      const {
+        aegis,
+        mock,
+        governance,
+        partyA,
+        partyB,
+        usdcToken,
+        arbiterSigners,
+      } = await loadFixture(deployFixture)
+      await registerAndStake(aegis, governance, arbiterSigners.slice(0, 3))
+      await stageMockCase(
+        mock,
+        usdcToken,
+        CASE_KEY,
+        partyA.address,
+        partyB.address,
+        usdc("1000"),
+        usdc("50"),
+      )
+      // openDispute requests VRF; we never fulfill, leaving the case
+      // in AwaitingArbiter.
+      await aegis.openDispute(await mock.getAddress(), CASE_KEY)
+      const aegisCaseId = await aegis.liveCaseFor(await mock.getAddress(), CASE_KEY)
+
+      // Before grace expires, force-cancel reverts.
+      await expect(
+        aegis.connect(governance).forceCancelStuck(aegisCaseId),
+      ).to.be.revertedWithCustomError(aegis, "CaseNotYetStuck")
+    })
+
+    it("cancels a stuck AwaitingArbiter case after the grace period", async () => {
+      const {
+        aegis,
+        mock,
+        governance,
+        partyA,
+        partyB,
+        usdcToken,
+        arbiterSigners,
+      } = await loadFixture(deployFixture)
+      await registerAndStake(aegis, governance, arbiterSigners.slice(0, 3))
+      await stageMockCase(
+        mock,
+        usdcToken,
+        CASE_KEY,
+        partyA.address,
+        partyB.address,
+        usdc("1000"),
+        usdc("50"),
+      )
+      await aegis.openDispute(await mock.getAddress(), CASE_KEY)
+      const aegisCaseId = await aegis.liveCaseFor(await mock.getAddress(), CASE_KEY)
+
+      // Advance past the grace window.
+      await time.increase(STUCK_GRACE + 1)
+
+      // Force-cancel succeeds.
+      await aegis.connect(governance).forceCancelStuck(aegisCaseId)
+
+      const c = await aegis.getCase(aegisCaseId)
+      expect(c.state).to.equal(7 /* Canceled */)
+      // liveCaseFor is cleared so a fresh dispute can be reopened.
+      expect(await aegis.liveCaseFor(await mock.getAddress(), CASE_KEY)).to.equal(
+        ethers.ZeroHash,
+      )
+    })
+
+    it("refunds the appellant on a stuck AwaitingAppealPanel case", async () => {
+      const ctx = await loadFixture(deployFixture)
+      const { aegis, governance, partyB, usdcToken, arbiterSigners } = ctx
+      // Setup case to AppealableResolved with verdict 60.
+      await registerAndStake(ctx.aegis, ctx.governance, arbiterSigners.slice(0, 6))
+      const fee = (usdc("1000") * 500n) / 10_000n
+      await stageMockCase(
+        ctx.mock,
+        ctx.usdcToken,
+        CASE_KEY,
+        ctx.partyA.address,
+        ctx.partyB.address,
+        usdc("1000"),
+        fee,
+      )
+      const { caseId, arbiter } = await openAndDraw(
+        ctx.aegis,
+        ctx.coordinator,
+        await ctx.mock.getAddress(),
+        CASE_KEY,
+      )
+      const originalSigner = arbiterSigners.find((s) => s.address === arbiter)!
+      await commitAndReveal(ctx.aegis, originalSigner, caseId, 60)
+
+      // partyB requests appeal — pulls 25 USDC fee, then VRF stalls.
+      await aegis.connect(partyB).requestAppeal(caseId)
+
+      // Past the grace window without VRF fulfillment.
+      await time.increase(STUCK_GRACE + 1)
+
+      const usdcAddr = await usdcToken.getAddress()
+      const before = await aegis.claimable(partyB.address, usdcAddr)
+
+      const cancelTx = await aegis.connect(governance).forceCancelStuck(caseId)
+      const receipt = await cancelTx.wait()
+      const canceledLog = receipt!.logs
+        .map((l) => {
+          try {
+            return aegis.interface.parseLog(l as any)
+          } catch {
+            return null
+          }
+        })
+        .find((e) => e?.name === "CaseCanceled")
+      expect(canceledLog).to.exist
+      expect(canceledLog!.args.appealFeeRefunded).to.equal(usdc("25"))
+
+      // Refund credited to appellant via claimable.
+      expect(await aegis.claimable(partyB.address, usdcAddr)).to.equal(
+        before + usdc("25"),
+      )
+      const c = await aegis.getCase(caseId)
+      expect(c.state).to.equal(7 /* Canceled */)
+    })
+
+    it("rejects calls from non-governance addresses", async () => {
+      const {
+        aegis,
+        mock,
+        governance,
+        partyA,
+        partyB,
+        stranger,
+        usdcToken,
+        arbiterSigners,
+      } = await loadFixture(deployFixture)
+      await registerAndStake(aegis, governance, arbiterSigners.slice(0, 3))
+      await stageMockCase(
+        mock,
+        usdcToken,
+        CASE_KEY,
+        partyA.address,
+        partyB.address,
+        usdc("1000"),
+        usdc("50"),
+      )
+      await aegis.openDispute(await mock.getAddress(), CASE_KEY)
+      const aegisCaseId = await aegis.liveCaseFor(await mock.getAddress(), CASE_KEY)
+      await time.increase(STUCK_GRACE + 1)
+
+      await expect(
+        aegis.connect(stranger).forceCancelStuck(aegisCaseId),
+      ).to.be.reverted
+    })
+
+    it("rejects calls on cases that aren't in a stuck-eligible state", async () => {
+      const ctx = await loadFixture(deployFixture)
+      const { aegis, coordinator, mock, governance, partyA, partyB, usdcToken, arbiterSigners } = ctx
+      await registerAndStake(aegis, governance, arbiterSigners.slice(0, 6))
+      await stageMockCase(
+        mock,
+        usdcToken,
+        CASE_KEY,
+        partyA.address,
+        partyB.address,
+        usdc("1000"),
+        usdc("50"),
+      )
+      // Open + fulfill VRF — case lands in Voting, not stuck.
+      const { caseId } = await openAndDraw(
+        aegis,
+        coordinator,
+        await mock.getAddress(),
+        CASE_KEY,
+      )
+      await time.increase(STUCK_GRACE + 1)
+
+      await expect(
+        aegis.connect(governance).forceCancelStuck(caseId),
+      ).to.be.revertedWithCustomError(aegis, "CaseNotStuck")
+    })
+  })
 })
