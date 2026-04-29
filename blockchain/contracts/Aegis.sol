@@ -810,6 +810,17 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
             return;
         }
 
+        if (c.state == CaseState.Voting && c.originalRevealed) {
+            // Appeal phase: settle when both have revealed early, or
+            // when the reveal window has closed (partial / full fail).
+            bool bothRevealed = c.appealSlots[0].revealed && c.appealSlots[1].revealed;
+            if (!bothRevealed && block.timestamp < c.appealRevealDeadline) {
+                revert RevealWindowOpen();
+            }
+            _settleAppeal(c, caseId);
+            return;
+        }
+
         if (c.state == CaseState.Resolved || c.state == CaseState.Defaulted) {
             revert CaseAlreadyFinalized();
         }
@@ -818,7 +829,157 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
             revert CaseNotFound();
         }
 
-        revert NotImplemented(); // Phase 4 (appeal settle) + Phase 5 (stall)
+        revert NotImplemented(); // Phase 5: stall fallbacks
+    }
+
+    /// @dev Appeal happy / partial / full-fail path. Computes the
+    /// final percentage from whatever votes are available, applies
+    /// to escrow, captures fee, distributes the 7.5% pot
+    /// (escrow fee + appellant's held appeal fee), slashes any
+    /// non-revealing appeal arbiter, and refunds the appellant on E4.
+    ///
+    /// Cases:
+    /// - Both reveal: median of 3 (D1 default).
+    /// - One reveal: median of 2 (E3 per D5(a)). Failed slot's bond
+    ///   is slashed; pot's unspent slot is rebated to parties pro-rata.
+    /// - No reveals: original verdict applies (E4 per D3 confirm).
+    ///   Both bonds slashed; appellant refunded their appeal fee.
+    function _settleAppeal(Case storage c, bytes32 caseId) internal {
+        AppealSlot storage slotA = c.appealSlots[0];
+        AppealSlot storage slotB = c.appealSlots[1];
+        bool aRevealed = slotA.revealed;
+        bool bRevealed = slotB.revealed;
+
+        uint16 finalPercentage;
+        if (aRevealed && bRevealed) {
+            finalPercentage = _medianOf3(
+                c.originalPercentage,
+                slotA.partyAPercentage,
+                slotB.partyAPercentage
+            );
+        } else if (aRevealed || bRevealed) {
+            uint16 appealVote = aRevealed ? slotA.partyAPercentage : slotB.partyAPercentage;
+            finalPercentage = _medianOf2(c.originalPercentage, appealVote);
+        } else {
+            // E4: no appeal arbiter revealed; original verdict stands.
+            finalPercentage = c.originalPercentage;
+        }
+        bytes32 finalDigest = c.originalDigest;
+        address feeToken = c.feeToken;
+
+        // Apply verdict to escrow, capture fee.
+        uint256 balBefore = IERC20(feeToken).balanceOf(address(this));
+        IArbitrableEscrow(c.escrow).applyArbitration(caseId, finalPercentage, finalDigest);
+        uint256 balAfter = IERC20(feeToken).balanceOf(address(this));
+        uint256 received = balAfter - balBefore;
+        c.escrowFeeReceived = received;
+
+        Policy memory p = policy;
+        uint96 stake = uint96(p.stakeRequirement);
+
+        // Release / slash arbiter locks.
+        _releaseLock(c.originalArbiter, stake);
+        if (aRevealed) {
+            _releaseLock(slotA.arbiter, stake);
+        } else {
+            _slashArbiter(slotA.arbiter, stake, caseId);
+        }
+        if (bRevealed) {
+            _releaseLock(slotB.arbiter, stake);
+        } else {
+            _slashArbiter(slotB.arbiter, stake, caseId);
+        }
+
+        // Pot to distribute = escrow fee + appellant's held appeal fee.
+        uint256 totalPot = received + c.appealFeeAmount;
+        uint256 perArbiter = (c.amount * p.perArbiterFeeBps) / BPS_DENOMINATOR;
+        uint256 paidToArbiters = 0;
+
+        // Original arbiter: always paid (their reveal happened in the
+        // original phase, by definition of being in this branch).
+        if (perArbiter > 0 && perArbiter <= totalPot) {
+            claimable[c.originalArbiter][feeToken] += perArbiter;
+            paidToArbiters += perArbiter;
+        }
+        if (aRevealed && paidToArbiters + perArbiter <= totalPot) {
+            claimable[slotA.arbiter][feeToken] += perArbiter;
+            paidToArbiters += perArbiter;
+        }
+        if (bRevealed && paidToArbiters + perArbiter <= totalPot) {
+            claimable[slotB.arbiter][feeToken] += perArbiter;
+            paidToArbiters += perArbiter;
+        }
+
+        // E4 (D3i*): refund the appellant's appeal fee from the
+        // remaining pot before any party rebate.
+        uint256 appellantRefund = 0;
+        if (!aRevealed && !bRevealed && c.appealFeeAmount > 0 && c.appellant != address(0)) {
+            appellantRefund = c.appealFeeAmount;
+            claimable[c.appellant][feeToken] += appellantRefund;
+        }
+
+        // Remainder: party rebate pro-rata by verdict (D1(c) pattern,
+        // extended to the appeal pot under D5(iv)-by-extension).
+        uint256 remainder = totalPot - paidToArbiters - appellantRefund;
+        if (remainder > 0) {
+            uint256 partyAShare = (remainder * finalPercentage) / 100;
+            uint256 partyBShare = remainder - partyAShare;
+            if (partyAShare > 0) {
+                claimable[c.partyA][feeToken] += partyAShare;
+                emit PartyRebated(caseId, c.partyA, feeToken, partyAShare);
+            }
+            if (partyBShare > 0) {
+                claimable[c.partyB][feeToken] += partyBShare;
+                emit PartyRebated(caseId, c.partyB, feeToken, partyBShare);
+            }
+        }
+
+        emit FeesAccrued(caseId, feeToken, totalPot, paidToArbiters, remainder, 0);
+        c.feesDistributed = true;
+
+        delete liveCaseFor[c.escrow][c.escrowCaseId];
+        c.state = CaseState.Resolved;
+
+        emit CaseResolved(caseId, finalPercentage, finalDigest);
+    }
+
+    /// @dev Median of 3 unsigned 16-bit values via three compare-swaps.
+    function _medianOf3(uint16 a, uint16 b, uint16 c) internal pure returns (uint16) {
+        if (a > b) (a, b) = (b, a);
+        if (b > c) (b, c) = (c, b);
+        if (a > b) (a, b) = (b, a);
+        return b;
+    }
+
+    /// @dev Median of 2 = floor((a+b)/2) per D6.
+    function _medianOf2(uint16 a, uint16 b) internal pure returns (uint16) {
+        return uint16((uint256(a) + uint256(b)) / 2);
+    }
+
+    /// @dev Release `amount` from the arbiter's stake lock without
+    /// touching their stakedAmount. Used on the success path.
+    function _releaseLock(address arbiter, uint96 amount) internal {
+        uint96 cur = lockedStake[arbiter];
+        lockedStake[arbiter] = cur > amount ? cur - amount : 0;
+    }
+
+    /// @dev Slash `amount` ELCP from the arbiter's stakedAmount and
+    /// release their lock for this case. Slashed amount → treasury in
+    /// the stake token. Used on non-reveal paths.
+    function _slashArbiter(address arbiter, uint256 amount, bytes32 caseId) internal {
+        Arbiter storage a = arbiters[arbiter];
+        uint96 slash = uint96(amount);
+        if (slash > a.stakedAmount) slash = a.stakedAmount;
+        a.stakedAmount -= slash;
+
+        uint96 cur = lockedStake[arbiter];
+        uint96 release = uint96(amount);
+        lockedStake[arbiter] = cur > release ? cur - release : 0;
+
+        if (slash > 0) {
+            treasuryAccrued[address(stakeToken)] += slash;
+            emit Slashed(arbiter, slash, caseId);
+        }
     }
 
     /// @dev No-appeal happy path. Apply the original arbiter's verdict
