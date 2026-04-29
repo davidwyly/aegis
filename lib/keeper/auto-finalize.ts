@@ -54,12 +54,28 @@ export async function autoFinalizePending(
     account,
   })
 
-  // Cases on this chain + Aegis instance that are still 'open' or
-  // 'revealing' and whose deadlineReveal has elapsed.
+  // Two finalize-eligibility patterns covered here:
+  //   (a) Original phase: status in {open, revealing}, deadlineReveal
+  //       has elapsed. finalize() either applies the verdict (no-appeal
+  //       happy path is direct) or triggers stall fallback.
+  //   (b) Appeal phase: status in {appeal_open, appeal_revealing}, the
+  //       appeal reveal deadline (also stored in deadlineReveal, since
+  //       the indexer overwrites it on the phase transition) has
+  //       elapsed — finalize() computes the median + applies it.
+  //
+  // Not covered here: AppealableResolved → Resolved transition when the
+  // appeal window expires. The schema doesn't track appealDeadline as a
+  // column yet; finalize for that path is left to manual triggering or
+  // to a follow-up that adds the column + indexer wiring.
   const inflight: SQL = and(
     eq(schema.cases.chainId, cfg.chainId),
     eq(schema.cases.aegisAddress, cfg.aegisAddress.toLowerCase()),
-    inArray(schema.cases.status, ["open", "revealing"]),
+    inArray(schema.cases.status, [
+      "open",
+      "revealing",
+      "appeal_open",
+      "appeal_revealing",
+    ]),
     lt(schema.cases.deadlineReveal, now),
   ) as SQL
 

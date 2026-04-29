@@ -297,18 +297,116 @@ async function applyCaseOpened(
 }
 
 /// Arbiter assigned to a slot — original OR appeal. Phase-agnostic by
-/// design (de novo). This handler is intentionally light: we leave the
-/// detailed slot tracking to the case-service layer in a follow-up.
-/// For now, just record the assignment in the indexer state for
-/// audit. TODO(7.3): wire to schema.panelMembers properly.
-async function applyArbiterDrawn(_cfg: IndexerConfig, _args: any) {
-  // No-op for now. CaseOpened seeded the original; appeal-slot
-  // tracking through panelMembers is wired in a follow-up chunk.
+/// design (de novo). Determines the slot from the existing panelMembers
+/// state for this case:
+/// - 0 active originals  ⇒ initial original draw (phase='original', seat 0)
+/// - 1 active original, not yet revealed ⇒ stall round-0 redraw — mark
+///   old as 'redrawn', insert new original at seat 0
+/// - 1 active original, revealed ⇒ appeal slot — count active appeal
+///   members to assign seat 0 or 1
+async function applyArbiterDrawn(cfg: IndexerConfig, args: any) {
+  const caseUuid = await findCaseUuid(cfg, args.caseId)
+  if (!caseUuid) return
+
+  const arbiter = (args.arbiter as string).toLowerCase()
+
+  const activeOriginals = await db
+    .select({
+      panelistAddress: schema.panelMembers.panelistAddress,
+      revealedAt: schema.panelMembers.revealedAt,
+    })
+    .from(schema.panelMembers)
+    .where(
+      and(
+        eq(schema.panelMembers.caseUuid, caseUuid),
+        eq(schema.panelMembers.phase, "original"),
+        sql`${schema.panelMembers.leftAt} IS NULL`,
+      ),
+    )
+
+  let phase: "original" | "appeal" = "original"
+  let seat = 0
+
+  if (activeOriginals.length > 0) {
+    const og = activeOriginals[0]
+    if (og.revealedAt !== null) {
+      phase = "appeal"
+      const activeAppeals = await db
+        .select({ panelistAddress: schema.panelMembers.panelistAddress })
+        .from(schema.panelMembers)
+        .where(
+          and(
+            eq(schema.panelMembers.caseUuid, caseUuid),
+            eq(schema.panelMembers.phase, "appeal"),
+            sql`${schema.panelMembers.leftAt} IS NULL`,
+          ),
+        )
+      seat = activeAppeals.length
+    } else if (og.panelistAddress.toLowerCase() !== arbiter) {
+      // Stall round-0 redraw: original hasn't revealed and a different
+      // arbiter is being drawn. Mark the old original as 'redrawn'.
+      await db
+        .update(schema.panelMembers)
+        .set({ leftAt: new Date(), leftReason: "redrawn" })
+        .where(
+          and(
+            eq(schema.panelMembers.caseUuid, caseUuid),
+            eq(schema.panelMembers.panelistAddress, og.panelistAddress),
+          ),
+        )
+    }
+    // If activeOriginals[0].panelistAddress === arbiter and no reveal,
+    // this is a re-emission for the same arbiter — onConflictDoNothing
+    // below makes it idempotent.
+  }
+
+  await db
+    .insert(schema.panelMembers)
+    .values({
+      caseUuid,
+      panelistAddress: arbiter,
+      seat,
+      phase,
+    })
+    .onConflictDoNothing()
 }
 
-async function applyArbiterRedrawn(_cfg: IndexerConfig, _args: any) {
-  // Redraws fire on stall round-0 + recuse. Detailed updates are
-  // a follow-up; the case status alone tracks the high-level state.
+/// Voluntary recusal — replace `previousArbiter` with `replacement` at
+/// the same phase + seat. Marks the previous row as left with reason
+/// 'recused' (vs 'redrawn' for stall).
+async function applyArbiterRedrawn(cfg: IndexerConfig, args: any) {
+  const caseUuid = await findCaseUuid(cfg, args.caseId)
+  if (!caseUuid) return
+
+  const previous = (args.previousArbiter as string).toLowerCase()
+  const replacement = (args.replacement as string).toLowerCase()
+
+  const prev = await db.query.panelMembers.findFirst({
+    where: (m, { and: a, eq: e }) =>
+      a(e(m.caseUuid, caseUuid), e(m.panelistAddress, previous)),
+    columns: { phase: true, seat: true },
+  })
+  if (!prev) return
+
+  await db
+    .update(schema.panelMembers)
+    .set({ leftAt: new Date(), leftReason: "recused" })
+    .where(
+      and(
+        eq(schema.panelMembers.caseUuid, caseUuid),
+        eq(schema.panelMembers.panelistAddress, previous),
+      ),
+    )
+
+  await db
+    .insert(schema.panelMembers)
+    .values({
+      caseUuid,
+      panelistAddress: replacement,
+      seat: prev.seat,
+      phase: prev.phase as "original" | "appeal",
+    })
+    .onConflictDoNothing()
 }
 
 async function findCaseUuid(
@@ -330,8 +428,9 @@ async function findCaseUuid(
 async function applyCommitted(cfg: IndexerConfig, args: any, _txHash: Hex) {
   const caseUuid = await findCaseUuid(cfg, args.caseId)
   if (!caseUuid) return
-  // Filter to phase='original' explicitly so this never crosses into an
-  // appeal-panel row even though the on-chain exclusion guarantees it.
+  // Phase-agnostic: under de novo, the same Committed event fires for
+  // original and appeal arbiters. Match by (caseUuid, arbiter) — the
+  // primary key guarantees a single matching row regardless of phase.
   await db
     .update(schema.panelMembers)
     .set({
@@ -345,7 +444,6 @@ async function applyCommitted(cfg: IndexerConfig, args: any, _txHash: Hex) {
           schema.panelMembers.panelistAddress,
           (args.arbiter as string).toLowerCase(),
         ),
-        eq(schema.panelMembers.phase, "original"),
       ),
     )
 }
@@ -367,10 +465,12 @@ async function applyRevealed(cfg: IndexerConfig, args: any) {
           schema.panelMembers.panelistAddress,
           (args.arbiter as string).toLowerCase(),
         ),
-        eq(schema.panelMembers.phase, "original"),
       ),
     )
-  // Bump the case status to 'revealing' if still 'open'.
+  // Bump the case status to 'revealing' if still 'open'. Note: under
+  // the new design the Voting state covers both commit + reveal sub-
+  // windows, so we only flip if the DB row reflects the older 'open'
+  // semantic carried over from v0.
   await db
     .update(schema.cases)
     .set({ status: "revealing", updatedAt: new Date() })
