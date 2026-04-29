@@ -542,4 +542,212 @@ describe("Aegis (single-arbiter + appeal-of-3)", () => {
       await expect(aegis.finalize(caseId)).to.be.revertedWithCustomError(aegis, "AppealWindowOpen")
     })
   })
+
+  // ============================================================
+  // Appeal flow — covers happy path, E3 partial reveal, E4 full
+  // non-reveal. Helpers below stage cases through commit-reveal so
+  // each test starts at AppealableResolved.
+  // ============================================================
+
+  describe("appeal flow", () => {
+    async function setupAppealableCase(
+      ctx: Awaited<ReturnType<typeof deployFixture>>,
+      verdict: number,
+      amount: bigint = usdc("1000"),
+    ) {
+      const { aegis, coordinator, mock, governance, partyA, partyB, usdcToken, arbiterSigners } = ctx
+      await registerAndStake(aegis, governance, arbiterSigners.slice(0, 6))
+      const fee = (amount * 500n) / 10_000n // 5% — Vaultra-style
+      await stageMockCase(mock, usdcToken, CASE_KEY, partyA.address, partyB.address, amount, fee)
+      const { caseId, arbiter } = await openAndDraw(
+        aegis,
+        coordinator,
+        await mock.getAddress(),
+        CASE_KEY,
+      )
+      const originalSigner = arbiterSigners.find((s) => s.address === arbiter)!
+      await commitAndReveal(aegis, originalSigner, caseId, verdict)
+      return { caseId, originalArbiter: arbiter, originalSigner, amount, fee }
+    }
+
+    async function requestAppealAndDraw(
+      ctx: Awaited<ReturnType<typeof deployFixture>>,
+      caseId: string,
+      appellant: Signer,
+      randomWord: bigint = 0xfeedfacefeedfacen,
+    ) {
+      const { aegis, coordinator } = ctx
+      const tx = await aegis.connect(appellant).requestAppeal(caseId)
+      const receipt = await tx.wait()
+      const requested = receipt!.logs
+        .map((l) => {
+          try {
+            return aegis.interface.parseLog(l as any)
+          } catch {
+            return null
+          }
+        })
+        .find((e) => e?.name === "AppealRequested")
+      const requestId = requested!.args.vrfRequestId as bigint
+
+      const fulfillTx = await coordinator.fulfillWithSingleWord(requestId, randomWord)
+      const fulfillReceipt = await fulfillTx.wait()
+      const draws = fulfillReceipt!.logs
+        .map((l) => {
+          try {
+            return aegis.interface.parseLog(l as any)
+          } catch {
+            return null
+          }
+        })
+        .filter((e) => e?.name === "ArbiterDrawn")
+      const appealA = draws[0]!.args.arbiter as string
+      const appealB = draws[1]!.args.arbiter as string
+      return { appealA, appealB }
+    }
+
+    it("happy path: median of 3 applied; 7.5% pot split equally across 3 arbiters", async () => {
+      const ctx = await loadFixture(deployFixture)
+      const { aegis, partyA, partyB, usdcToken, arbiterSigners } = ctx
+      const { caseId, originalArbiter, amount } = await setupAppealableCase(ctx, 60)
+
+      // partyB appeals (compromise verdict; either party can per D12).
+      const { appealA, appealB } = await requestAppealAndDraw(ctx, caseId, partyB)
+      const signerA = arbiterSigners.find((s) => s.address === appealA)!
+      const signerB = arbiterSigners.find((s) => s.address === appealB)!
+
+      // Votes: orig=60, A=20, B=30 → sorted [20,30,60] → median 30 (partyB wins more)
+      // Both arbiters commit before any time advance, then advance once,
+      // then both reveal. commitAndReveal's time-advance pattern doesn't
+      // work for multi-arbiter phases.
+      const saltA = ethers.hexlify(ethers.randomBytes(32))
+      const digestA = ethers.keccak256(ethers.toUtf8Bytes("A-rationale"))
+      const hashA = makeCommit(appealA, caseId, 20, saltA, digestA)
+      const saltB = ethers.hexlify(ethers.randomBytes(32))
+      const digestB = ethers.keccak256(ethers.toUtf8Bytes("B-rationale"))
+      const hashB = makeCommit(appealB, caseId, 30, saltB, digestB)
+      await aegis.connect(signerA).commitVote(caseId, hashA)
+      await aegis.connect(signerB).commitVote(caseId, hashB)
+      await time.increase(COMMIT_WINDOW + 1)
+      await aegis.connect(signerA).revealVote(caseId, 20, saltA, digestA)
+      await aegis.connect(signerB).revealVote(caseId, 30, saltB, digestB)
+      await aegis.finalize(caseId)
+
+      const usdcAddr = await usdcToken.getAddress()
+      const c = await aegis.getCase(caseId)
+      expect(c.state).to.equal(STATE_RESOLVED)
+      // Median of (60, 20, 30) = 30.
+      // Pot: 5% escrow fee (50) + 2.5% appeal fee (25) = 75 USDC.
+      // 3 arbiters × 25 = 75. Treasury = 0. No remainder → no party rebate.
+      expect(await aegis.claimable(originalArbiter, usdcAddr)).to.equal(usdc("25"))
+      expect(await aegis.claimable(appealA, usdcAddr)).to.equal(usdc("25"))
+      expect(await aegis.claimable(appealB, usdcAddr)).to.equal(usdc("25"))
+      expect(await aegis.claimable(partyA.address, usdcAddr)).to.equal(0)
+      expect(await aegis.claimable(partyB.address, usdcAddr)).to.equal(0)
+      expect(await aegis.treasuryAccrued(usdcAddr)).to.equal(0)
+      void amount // unused but documents the disputed amount above
+    })
+
+    it("E3: only one appeal arbiter reveals — median of 2, slash absent, party rebate covers unspent slot", async () => {
+      const ctx = await loadFixture(deployFixture)
+      const {
+        aegis,
+        partyA,
+        partyB,
+        usdcToken,
+        elcpToken,
+        arbiterSigners,
+      } = ctx
+      const { caseId, originalArbiter } = await setupAppealableCase(ctx, 60)
+
+      const { appealA, appealB } = await requestAppealAndDraw(ctx, caseId, partyB)
+      const signerA = arbiterSigners.find((s) => s.address === appealA)!
+      const signerB = arbiterSigners.find((s) => s.address === appealB)!
+
+      // A reveals 40; B never reveals. Median-of-2 = floor((60+40)/2) = 50.
+      const saltA = ethers.hexlify(ethers.randomBytes(32))
+      const digestA = ethers.keccak256(ethers.toUtf8Bytes("A-rationale"))
+      const hashA = makeCommit(appealA, caseId, 40, saltA, digestA)
+      const saltB = ethers.hexlify(ethers.randomBytes(32))
+      const digestB = ethers.keccak256(ethers.toUtf8Bytes("B-rationale"))
+      const hashB = makeCommit(appealB, caseId, 80, saltB, digestB)
+      await aegis.connect(signerA).commitVote(caseId, hashA)
+      await aegis.connect(signerB).commitVote(caseId, hashB)
+      await time.increase(COMMIT_WINDOW + 1)
+      // A reveals; B abandons.
+      await aegis.connect(signerA).revealVote(caseId, 40, saltA, digestA)
+      await time.increase(REVEAL_WINDOW + 1)
+      await aegis.finalize(caseId)
+
+      const usdcAddr = await usdcToken.getAddress()
+      const elcpAddr = await elcpToken.getAddress()
+      const c = await aegis.getCase(caseId)
+      expect(c.state).to.equal(STATE_RESOLVED)
+
+      // 2 arbiters get 25 USDC each (orig + revealing appeal). 1 unspent
+      // 25 USDC slot rebated to parties pro-rata to median 50:
+      //   partyA = (25e6 * 50) / 100 = 12.5 USDC; partyB = 25 - 12.5 = 12.5 USDC.
+      expect(await aegis.claimable(originalArbiter, usdcAddr)).to.equal(usdc("25"))
+      expect(await aegis.claimable(appealA, usdcAddr)).to.equal(usdc("25"))
+      expect(await aegis.claimable(appealB, usdcAddr)).to.equal(0)
+      expect(await aegis.claimable(partyA.address, usdcAddr)).to.equal(usdc("12.5"))
+      expect(await aegis.claimable(partyB.address, usdcAddr)).to.equal(usdc("12.5"))
+
+      // Non-revealer slashed one stakeRequirement (100 ELCP) → treasury.
+      expect(await aegis.treasuryAccrued(elcpAddr)).to.equal(STAKE_REQ)
+      // Each arbiter staked STAKE_REQ; slashing one bond zeros them out.
+      expect((await aegis.arbiters(appealB)).stakedAmount).to.equal(0)
+    })
+
+    it("E4: neither appeal arbiter reveals — original verdict applies, appellant refunded, both bonds slashed", async () => {
+      const ctx = await loadFixture(deployFixture)
+      const {
+        aegis,
+        partyA,
+        partyB,
+        usdcToken,
+        elcpToken,
+        arbiterSigners,
+      } = ctx
+      const { caseId, originalArbiter } = await setupAppealableCase(ctx, 60)
+      const partyBUsdcBefore = await usdcToken.balanceOf(partyB.address)
+
+      const { appealA, appealB } = await requestAppealAndDraw(ctx, caseId, partyB)
+      const signerA = arbiterSigners.find((s) => s.address === appealA)!
+      const signerB = arbiterSigners.find((s) => s.address === appealB)!
+
+      // Both commit; neither reveals.
+      const saltA = ethers.hexlify(ethers.randomBytes(32))
+      const digestA = ethers.keccak256(ethers.toUtf8Bytes("A"))
+      const hashA = makeCommit(appealA, caseId, 30, saltA, digestA)
+      await aegis.connect(signerA).commitVote(caseId, hashA)
+      const saltB = ethers.hexlify(ethers.randomBytes(32))
+      const digestB = ethers.keccak256(ethers.toUtf8Bytes("B"))
+      const hashB = makeCommit(appealB, caseId, 70, saltB, digestB)
+      await aegis.connect(signerB).commitVote(caseId, hashB)
+
+      await time.increase(COMMIT_WINDOW + REVEAL_WINDOW + 1)
+      await aegis.finalize(caseId)
+
+      const usdcAddr = await usdcToken.getAddress()
+      const elcpAddr = await elcpToken.getAddress()
+      const c = await aegis.getCase(caseId)
+      expect(c.state).to.equal(STATE_RESOLVED)
+
+      // Original verdict (60) applies. Original arbiter still paid 25 USDC.
+      // Appellant (partyB) refunded their 25 USDC appeal fee.
+      // Remainder = 75 - 25 - 25 = 25 USDC → rebate per verdict 60:
+      //   partyA = (25 * 60) / 100 = 15; partyB = 25 - 15 = 10
+      // partyB's claimable = 25 (refund) + 10 (rebate) = 35.
+      expect(await aegis.claimable(originalArbiter, usdcAddr)).to.equal(usdc("25"))
+      expect(await aegis.claimable(appealA, usdcAddr)).to.equal(0)
+      expect(await aegis.claimable(appealB, usdcAddr)).to.equal(0)
+      expect(await aegis.claimable(partyA.address, usdcAddr)).to.equal(usdc("15"))
+      expect(await aegis.claimable(partyB.address, usdcAddr)).to.equal(usdc("35"))
+
+      // Both appeal bonds slashed → 200 ELCP to treasury.
+      expect(await aegis.treasuryAccrued(elcpAddr)).to.equal(STAKE_REQ * 2n)
+      void partyBUsdcBefore
+    })
+  })
 })
