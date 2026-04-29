@@ -47,13 +47,8 @@ export const aegisAbi = [
       {
         "components": [
           {
-            "internalType": "uint8",
-            "name": "panelSize",
-            "type": "uint8"
-          },
-          {
             "internalType": "uint64",
-            "name": "voteWindow",
+            "name": "commitWindow",
             "type": "uint64"
           },
           {
@@ -67,39 +62,34 @@ export const aegisAbi = [
             "type": "uint64"
           },
           {
+            "internalType": "uint64",
+            "name": "appealWindow",
+            "type": "uint64"
+          },
+          {
+            "internalType": "uint64",
+            "name": "repeatArbiterCooldown",
+            "type": "uint64"
+          },
+          {
             "internalType": "uint256",
             "name": "stakeRequirement",
             "type": "uint256"
           },
           {
             "internalType": "uint16",
-            "name": "panelFeeBps",
+            "name": "appealFeeBps",
+            "type": "uint16"
+          },
+          {
+            "internalType": "uint16",
+            "name": "perArbiterFeeBps",
             "type": "uint16"
           },
           {
             "internalType": "address",
             "name": "treasury",
             "type": "address"
-          },
-          {
-            "internalType": "uint64",
-            "name": "appealWindow",
-            "type": "uint64"
-          },
-          {
-            "internalType": "uint8",
-            "name": "appealPanelSize",
-            "type": "uint8"
-          },
-          {
-            "internalType": "uint256",
-            "name": "appealBondAmount",
-            "type": "uint256"
-          },
-          {
-            "internalType": "uint16",
-            "name": "appealOverturnTolerance",
-            "type": "uint16"
           }
         ],
         "internalType": "struct Aegis.Policy",
@@ -218,6 +208,11 @@ export const aegisAbi = [
   },
   {
     "inputs": [],
+    "name": "CaseNotInVotingState",
+    "type": "error"
+  },
+  {
+    "inputs": [],
     "name": "CaseNotOpen",
     "type": "error"
   },
@@ -249,6 +244,11 @@ export const aegisAbi = [
   {
     "inputs": [],
     "name": "EscrowReportsInactive",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "FullWinnerCannotAppeal",
     "type": "error"
   },
   {
@@ -293,7 +293,17 @@ export const aegisAbi = [
   },
   {
     "inputs": [],
+    "name": "NotAssignedArbiter",
+    "type": "error"
+  },
+  {
+    "inputs": [],
     "name": "NotEnoughArbiters",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "NotImplemented",
     "type": "error"
   },
   {
@@ -369,89 +379,20 @@ export const aegisAbi = [
       {
         "indexed": true,
         "internalType": "address",
-        "name": "panelist",
-        "type": "address"
-      },
-      {
-        "indexed": false,
-        "internalType": "bytes32",
-        "name": "commitHash",
-        "type": "bytes32"
-      }
-    ],
-    "name": "AppealCommitted",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": true,
-        "internalType": "bytes32",
-        "name": "caseId",
-        "type": "bytes32"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint16",
-        "name": "originalPercentage",
-        "type": "uint16"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint16",
-        "name": "appealPercentage",
-        "type": "uint16"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint256",
-        "name": "originalPanelSlashed",
-        "type": "uint256"
-      }
-    ],
-    "name": "AppealOverturned",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": true,
-        "internalType": "bytes32",
-        "name": "caseId",
-        "type": "bytes32"
-      },
-      {
-        "indexed": false,
-        "internalType": "address[]",
-        "name": "panel",
-        "type": "address[]"
-      }
-    ],
-    "name": "AppealPanelSeated",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": true,
-        "internalType": "bytes32",
-        "name": "caseId",
-        "type": "bytes32"
-      },
-      {
-        "indexed": true,
-        "internalType": "address",
         "name": "appellant",
         "type": "address"
       },
       {
         "indexed": false,
         "internalType": "uint256",
-        "name": "bondAmount",
+        "name": "feeAmount",
         "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "address",
+        "name": "feeToken",
+        "type": "address"
       },
       {
         "indexed": false,
@@ -475,67 +416,36 @@ export const aegisAbi = [
       {
         "indexed": true,
         "internalType": "address",
-        "name": "panelist",
+        "name": "arbiter",
+        "type": "address"
+      }
+    ],
+    "name": "ArbiterDrawn",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "bytes32",
+        "name": "caseId",
+        "type": "bytes32"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "previousArbiter",
         "type": "address"
       },
       {
-        "indexed": false,
-        "internalType": "uint16",
-        "name": "partyAPercentage",
-        "type": "uint16"
-      },
-      {
-        "indexed": false,
-        "internalType": "bytes32",
-        "name": "rationaleDigest",
-        "type": "bytes32"
-      }
-    ],
-    "name": "AppealRevealed",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
         "indexed": true,
-        "internalType": "bytes32",
-        "name": "caseId",
-        "type": "bytes32"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint256",
-        "name": "slashedTotal",
-        "type": "uint256"
+        "internalType": "address",
+        "name": "replacement",
+        "type": "address"
       }
     ],
-    "name": "AppealStalled",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": true,
-        "internalType": "bytes32",
-        "name": "caseId",
-        "type": "bytes32"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint16",
-        "name": "originalPercentage",
-        "type": "uint16"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint16",
-        "name": "appealPercentage",
-        "type": "uint16"
-      }
-    ],
-    "name": "AppealUpheld",
+    "name": "ArbiterRedrawn",
     "type": "event"
   },
   {
@@ -574,37 +484,6 @@ export const aegisAbi = [
       }
     ],
     "name": "ArbiterRevoked",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": true,
-        "internalType": "bytes32",
-        "name": "caseId",
-        "type": "bytes32"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint16",
-        "name": "originalPercentage",
-        "type": "uint16"
-      },
-      {
-        "indexed": false,
-        "internalType": "bytes32",
-        "name": "originalDigest",
-        "type": "bytes32"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint64",
-        "name": "appealDeadline",
-        "type": "uint64"
-      }
-    ],
-    "name": "CaseAppealable",
     "type": "event"
   },
   {
@@ -670,12 +549,6 @@ export const aegisAbi = [
         "internalType": "uint256",
         "name": "amount",
         "type": "uint256"
-      },
-      {
-        "indexed": false,
-        "internalType": "address[]",
-        "name": "panel",
-        "type": "address[]"
       }
     ],
     "name": "CaseOpened",
@@ -748,7 +621,7 @@ export const aegisAbi = [
       {
         "indexed": false,
         "internalType": "uint16",
-        "name": "medianPercentage",
+        "name": "finalPercentage",
         "type": "uint16"
       },
       {
@@ -773,7 +646,7 @@ export const aegisAbi = [
       {
         "indexed": true,
         "internalType": "address",
-        "name": "panelist",
+        "name": "arbiter",
         "type": "address"
       },
       {
@@ -810,7 +683,13 @@ export const aegisAbi = [
       {
         "indexed": false,
         "internalType": "uint256",
-        "name": "panelTotal",
+        "name": "arbiterTotal",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "partyRebateTotal",
         "type": "uint256"
       },
       {
@@ -871,38 +750,25 @@ export const aegisAbi = [
         "type": "bytes32"
       },
       {
-        "indexed": false,
-        "internalType": "address[]",
-        "name": "newPanel",
-        "type": "address[]"
-      }
-    ],
-    "name": "PanelRedrawn",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
         "indexed": true,
-        "internalType": "bytes32",
-        "name": "caseId",
-        "type": "bytes32"
+        "internalType": "address",
+        "name": "party",
+        "type": "address"
       },
       {
-        "indexed": false,
-        "internalType": "uint8",
-        "name": "round",
-        "type": "uint8"
+        "indexed": true,
+        "internalType": "address",
+        "name": "token",
+        "type": "address"
       },
       {
         "indexed": false,
         "internalType": "uint256",
-        "name": "slashedTotal",
+        "name": "amount",
         "type": "uint256"
       }
     ],
-    "name": "PanelStalled",
+    "name": "PartyRebated",
     "type": "event"
   },
   {
@@ -910,14 +776,8 @@ export const aegisAbi = [
     "inputs": [
       {
         "indexed": false,
-        "internalType": "uint8",
-        "name": "panelSize",
-        "type": "uint8"
-      },
-      {
-        "indexed": false,
         "internalType": "uint64",
-        "name": "voteWindow",
+        "name": "commitWindow",
         "type": "uint64"
       },
       {
@@ -934,6 +794,18 @@ export const aegisAbi = [
       },
       {
         "indexed": false,
+        "internalType": "uint64",
+        "name": "appealWindow",
+        "type": "uint64"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint64",
+        "name": "repeatArbiterCooldown",
+        "type": "uint64"
+      },
+      {
+        "indexed": false,
         "internalType": "uint256",
         "name": "stakeRequirement",
         "type": "uint256"
@@ -941,7 +813,13 @@ export const aegisAbi = [
       {
         "indexed": false,
         "internalType": "uint16",
-        "name": "panelFeeBps",
+        "name": "appealFeeBps",
+        "type": "uint16"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint16",
+        "name": "perArbiterFeeBps",
         "type": "uint16"
       },
       {
@@ -974,12 +852,6 @@ export const aegisAbi = [
         "internalType": "address",
         "name": "replacement",
         "type": "address"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint8",
-        "name": "seat",
-        "type": "uint8"
       }
     ],
     "name": "Recused",
@@ -997,7 +869,7 @@ export const aegisAbi = [
       {
         "indexed": true,
         "internalType": "address",
-        "name": "panelist",
+        "name": "arbiter",
         "type": "address"
       },
       {
@@ -1171,6 +1043,31 @@ export const aegisAbi = [
     "inputs": [
       {
         "indexed": true,
+        "internalType": "bytes32",
+        "name": "caseId",
+        "type": "bytes32"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint8",
+        "name": "round",
+        "type": "uint8"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "slashedTotal",
+        "type": "uint256"
+      }
+    ],
+    "name": "Stalled",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
         "internalType": "address",
         "name": "token",
         "type": "address"
@@ -1269,153 +1166,6 @@ export const aegisAbi = [
         "internalType": "bytes32",
         "name": "",
         "type": "bytes32"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "bytes32",
-        "name": "caseId",
-        "type": "bytes32"
-      },
-      {
-        "internalType": "bytes32",
-        "name": "commitHash",
-        "type": "bytes32"
-      }
-    ],
-    "name": "appealCommitVote",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "bytes32",
-        "name": "caseId",
-        "type": "bytes32"
-      },
-      {
-        "internalType": "uint16",
-        "name": "partyAPercentage",
-        "type": "uint16"
-      },
-      {
-        "internalType": "bytes32",
-        "name": "salt",
-        "type": "bytes32"
-      },
-      {
-        "internalType": "bytes32",
-        "name": "rationaleDigest",
-        "type": "bytes32"
-      }
-    ],
-    "name": "appealRevealVote",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "bytes32",
-        "name": "",
-        "type": "bytes32"
-      }
-    ],
-    "name": "appeals",
-    "outputs": [
-      {
-        "internalType": "bool",
-        "name": "exists",
-        "type": "bool"
-      },
-      {
-        "internalType": "address",
-        "name": "appellant",
-        "type": "address"
-      },
-      {
-        "internalType": "uint256",
-        "name": "bondAmount",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint64",
-        "name": "appealDeadline",
-        "type": "uint64"
-      },
-      {
-        "internalType": "uint64",
-        "name": "deadlineCommit",
-        "type": "uint64"
-      },
-      {
-        "internalType": "uint64",
-        "name": "deadlineReveal",
-        "type": "uint64"
-      },
-      {
-        "internalType": "uint8",
-        "name": "panelSize",
-        "type": "uint8"
-      },
-      {
-        "internalType": "uint8",
-        "name": "commitCount",
-        "type": "uint8"
-      },
-      {
-        "internalType": "uint8",
-        "name": "revealCount",
-        "type": "uint8"
-      },
-      {
-        "internalType": "uint16",
-        "name": "originalPercentage",
-        "type": "uint16"
-      },
-      {
-        "internalType": "bytes32",
-        "name": "originalDigest",
-        "type": "bytes32"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "index",
-        "type": "uint256"
-      }
-    ],
-    "name": "arbiterAt",
-    "outputs": [
-      {
-        "internalType": "address",
-        "name": "",
-        "type": "address"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "arbiterCount",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "",
-        "type": "uint256"
       }
     ],
     "stateMutability": "view",
@@ -1534,79 +1284,182 @@ export const aegisAbi = [
         "internalType": "bytes32",
         "name": "caseId",
         "type": "bytes32"
+      },
+      {
+        "internalType": "uint8",
+        "name": "idx",
+        "type": "uint8"
+      }
+    ],
+    "name": "getAppealSlot",
+    "outputs": [
+      {
+        "components": [
+          {
+            "internalType": "address",
+            "name": "arbiter",
+            "type": "address"
+          },
+          {
+            "internalType": "bytes32",
+            "name": "commitHash",
+            "type": "bytes32"
+          },
+          {
+            "internalType": "uint16",
+            "name": "partyAPercentage",
+            "type": "uint16"
+          },
+          {
+            "internalType": "bytes32",
+            "name": "rationaleDigest",
+            "type": "bytes32"
+          },
+          {
+            "internalType": "bool",
+            "name": "revealed",
+            "type": "bool"
+          }
+        ],
+        "internalType": "struct Aegis.AppealSlot",
+        "name": "",
+        "type": "tuple"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "caseId",
+        "type": "bytes32"
       }
     ],
     "name": "getCase",
     "outputs": [
       {
-        "internalType": "address",
-        "name": "escrow",
-        "type": "address"
-      },
-      {
-        "internalType": "bytes32",
-        "name": "escrowCaseId",
-        "type": "bytes32"
-      },
-      {
-        "internalType": "address",
-        "name": "partyA",
-        "type": "address"
-      },
-      {
-        "internalType": "address",
-        "name": "partyB",
-        "type": "address"
-      },
-      {
-        "internalType": "address",
-        "name": "feeToken",
-        "type": "address"
-      },
-      {
-        "internalType": "uint256",
-        "name": "amount",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint64",
-        "name": "openedAt",
-        "type": "uint64"
-      },
-      {
-        "internalType": "uint64",
-        "name": "deadlineCommit",
-        "type": "uint64"
-      },
-      {
-        "internalType": "uint64",
-        "name": "deadlineReveal",
-        "type": "uint64"
-      },
-      {
-        "internalType": "uint8",
-        "name": "round",
-        "type": "uint8"
-      },
-      {
-        "internalType": "uint8",
-        "name": "panelSize",
-        "type": "uint8"
-      },
-      {
-        "internalType": "uint8",
-        "name": "commitCount",
-        "type": "uint8"
-      },
-      {
-        "internalType": "uint8",
-        "name": "revealCount",
-        "type": "uint8"
-      },
-      {
-        "internalType": "enum Aegis.CaseStatus",
-        "name": "status",
-        "type": "uint8"
+        "components": [
+          {
+            "internalType": "address",
+            "name": "escrow",
+            "type": "address"
+          },
+          {
+            "internalType": "bytes32",
+            "name": "escrowCaseId",
+            "type": "bytes32"
+          },
+          {
+            "internalType": "address",
+            "name": "partyA",
+            "type": "address"
+          },
+          {
+            "internalType": "address",
+            "name": "partyB",
+            "type": "address"
+          },
+          {
+            "internalType": "address",
+            "name": "feeToken",
+            "type": "address"
+          },
+          {
+            "internalType": "uint256",
+            "name": "amount",
+            "type": "uint256"
+          },
+          {
+            "internalType": "enum Aegis.CaseState",
+            "name": "state",
+            "type": "uint8"
+          },
+          {
+            "internalType": "uint8",
+            "name": "stallRound",
+            "type": "uint8"
+          },
+          {
+            "internalType": "uint64",
+            "name": "openedAt",
+            "type": "uint64"
+          },
+          {
+            "internalType": "address",
+            "name": "originalArbiter",
+            "type": "address"
+          },
+          {
+            "internalType": "bytes32",
+            "name": "originalCommitHash",
+            "type": "bytes32"
+          },
+          {
+            "internalType": "uint16",
+            "name": "originalPercentage",
+            "type": "uint16"
+          },
+          {
+            "internalType": "bytes32",
+            "name": "originalDigest",
+            "type": "bytes32"
+          },
+          {
+            "internalType": "uint64",
+            "name": "originalCommitDeadline",
+            "type": "uint64"
+          },
+          {
+            "internalType": "uint64",
+            "name": "originalRevealDeadline",
+            "type": "uint64"
+          },
+          {
+            "internalType": "bool",
+            "name": "originalRevealed",
+            "type": "bool"
+          },
+          {
+            "internalType": "address",
+            "name": "appellant",
+            "type": "address"
+          },
+          {
+            "internalType": "uint64",
+            "name": "appealDeadline",
+            "type": "uint64"
+          },
+          {
+            "internalType": "uint64",
+            "name": "appealCommitDeadline",
+            "type": "uint64"
+          },
+          {
+            "internalType": "uint64",
+            "name": "appealRevealDeadline",
+            "type": "uint64"
+          },
+          {
+            "internalType": "uint256",
+            "name": "appealFeeAmount",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "escrowFeeReceived",
+            "type": "uint256"
+          },
+          {
+            "internalType": "bool",
+            "name": "feesDistributed",
+            "type": "bool"
+          }
+        ],
+        "internalType": "struct Aegis.CaseView",
+        "name": "",
+        "type": "tuple"
       }
     ],
     "stateMutability": "view",
@@ -1621,50 +1474,38 @@ export const aegisAbi = [
       },
       {
         "internalType": "address",
-        "name": "panelist",
+        "name": "arbiter",
         "type": "address"
       }
     ],
     "name": "getCommit",
     "outputs": [
       {
-        "internalType": "bytes32",
-        "name": "hash",
-        "type": "bytes32"
-      },
-      {
-        "internalType": "bool",
-        "name": "revealed",
-        "type": "bool"
-      },
-      {
-        "internalType": "uint16",
-        "name": "partyAPercentage",
-        "type": "uint16"
-      },
-      {
-        "internalType": "bytes32",
-        "name": "rationaleDigest",
-        "type": "bytes32"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "bytes32",
-        "name": "caseId",
-        "type": "bytes32"
-      }
-    ],
-    "name": "getPanel",
-    "outputs": [
-      {
-        "internalType": "address[]",
+        "components": [
+          {
+            "internalType": "bytes32",
+            "name": "hash",
+            "type": "bytes32"
+          },
+          {
+            "internalType": "bool",
+            "name": "revealed",
+            "type": "bool"
+          },
+          {
+            "internalType": "uint16",
+            "name": "partyAPercentage",
+            "type": "uint16"
+          },
+          {
+            "internalType": "bytes32",
+            "name": "rationaleDigest",
+            "type": "bytes32"
+          }
+        ],
+        "internalType": "struct Aegis.CommitView",
         "name": "",
-        "type": "address[]"
+        "type": "tuple"
       }
     ],
     "stateMutability": "view",
@@ -1735,7 +1576,7 @@ export const aegisAbi = [
     "inputs": [
       {
         "internalType": "address",
-        "name": "panelist",
+        "name": "arbiter",
         "type": "address"
       },
       {
@@ -1768,6 +1609,30 @@ export const aegisAbi = [
       }
     ],
     "stateMutability": "pure",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "address",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "name": "lastArbitratedAt",
+    "outputs": [
+      {
+        "internalType": "uint64",
+        "name": "",
+        "type": "uint64"
+      }
+    ],
+    "stateMutability": "view",
     "type": "function"
   },
   {
@@ -1855,13 +1720,8 @@ export const aegisAbi = [
     "name": "policy",
     "outputs": [
       {
-        "internalType": "uint8",
-        "name": "panelSize",
-        "type": "uint8"
-      },
-      {
         "internalType": "uint64",
-        "name": "voteWindow",
+        "name": "commitWindow",
         "type": "uint64"
       },
       {
@@ -1875,39 +1735,34 @@ export const aegisAbi = [
         "type": "uint64"
       },
       {
+        "internalType": "uint64",
+        "name": "appealWindow",
+        "type": "uint64"
+      },
+      {
+        "internalType": "uint64",
+        "name": "repeatArbiterCooldown",
+        "type": "uint64"
+      },
+      {
         "internalType": "uint256",
         "name": "stakeRequirement",
         "type": "uint256"
       },
       {
         "internalType": "uint16",
-        "name": "panelFeeBps",
+        "name": "appealFeeBps",
+        "type": "uint16"
+      },
+      {
+        "internalType": "uint16",
+        "name": "perArbiterFeeBps",
         "type": "uint16"
       },
       {
         "internalType": "address",
         "name": "treasury",
         "type": "address"
-      },
-      {
-        "internalType": "uint64",
-        "name": "appealWindow",
-        "type": "uint64"
-      },
-      {
-        "internalType": "uint8",
-        "name": "appealPanelSize",
-        "type": "uint8"
-      },
-      {
-        "internalType": "uint256",
-        "name": "appealBondAmount",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint16",
-        "name": "appealOverturnTolerance",
-        "type": "uint16"
       }
     ],
     "stateMutability": "view",
@@ -2089,13 +1944,8 @@ export const aegisAbi = [
       {
         "components": [
           {
-            "internalType": "uint8",
-            "name": "panelSize",
-            "type": "uint8"
-          },
-          {
             "internalType": "uint64",
-            "name": "voteWindow",
+            "name": "commitWindow",
             "type": "uint64"
           },
           {
@@ -2109,39 +1959,34 @@ export const aegisAbi = [
             "type": "uint64"
           },
           {
+            "internalType": "uint64",
+            "name": "appealWindow",
+            "type": "uint64"
+          },
+          {
+            "internalType": "uint64",
+            "name": "repeatArbiterCooldown",
+            "type": "uint64"
+          },
+          {
             "internalType": "uint256",
             "name": "stakeRequirement",
             "type": "uint256"
           },
           {
             "internalType": "uint16",
-            "name": "panelFeeBps",
+            "name": "appealFeeBps",
+            "type": "uint16"
+          },
+          {
+            "internalType": "uint16",
+            "name": "perArbiterFeeBps",
             "type": "uint16"
           },
           {
             "internalType": "address",
             "name": "treasury",
             "type": "address"
-          },
-          {
-            "internalType": "uint64",
-            "name": "appealWindow",
-            "type": "uint64"
-          },
-          {
-            "internalType": "uint8",
-            "name": "appealPanelSize",
-            "type": "uint8"
-          },
-          {
-            "internalType": "uint256",
-            "name": "appealBondAmount",
-            "type": "uint256"
-          },
-          {
-            "internalType": "uint16",
-            "name": "appealOverturnTolerance",
-            "type": "uint16"
           }
         ],
         "internalType": "struct Aegis.Policy",
