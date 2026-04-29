@@ -139,29 +139,37 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
 
     // ============================================================
     // Cases
+    //
+    // Single-arbiter original verdict + 2-arbiter appeal augmentation
+    // (median of 3 if appealed). State names are phase-agnostic by
+    // design — appeal arbiters drawn under de novo review see the
+    // same `Voting`/`Revealing` state as original arbiters. The phase
+    // is inferred internally from `originalRevealed`.
     // ============================================================
 
-    enum CaseStatus {
+    enum CaseState {
         None,
-        AwaitingPanel, // VRF requested; waiting for fulfillRandomWords callback
-        Open, // commit phase
-        Revealing, // reveal phase
-        AppealableResolved, // original verdict computed; appeal window open
-        AppealAwaitingPanel, // appeal requested; waiting on VRF for the larger panel
-        AppealOpen, // appeal commit phase
-        AppealRevealing, // appeal reveal phase
-        Resolved,
-        DefaultResolved // 50/50 fallback applied after second stall
+        AwaitingArbiter, // VRF requested; arbiter not yet drawn
+        Voting, // commit window open
+        Revealing, // reveal window open
+        AppealableResolved, // original revealed; appeal window open
+        AwaitingAppealPanel, // appeal requested; VRF for 2 new arbiters pending
+        Resolved, // applyArbitration called; case closed
+        Defaulted // 50/50 fallback applied after stall round 1
     }
 
-    struct Commit {
-        bytes32 hash;
-        bool revealed;
+    /// @notice One of two appeal-arbiter slots. Fixed-size to avoid
+    /// dynamic-array gymnastics for a known-2 quorum extension.
+    struct AppealSlot {
+        address arbiter;
+        bytes32 commitHash;
         uint16 partyAPercentage;
         bytes32 rationaleDigest;
+        bool revealed;
     }
 
     struct Case {
+        // Identity
         address escrow;
         bytes32 escrowCaseId;
         address partyA;
@@ -169,33 +177,45 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
         address feeToken;
         uint256 amount;
         uint64 openedAt;
-        uint64 deadlineCommit;
-        uint64 deadlineReveal;
-        uint8 round; // 0 first attempt, 1 redraw
-        uint8 panelSize;
-        uint8 commitCount;
-        uint8 revealCount;
-        CaseStatus status;
-        // Verdict from the original panel — staged here while the case is
-        // in AppealableResolved / appeal-* states, so a no-appeal expiry
-        // can apply it and an appeal can compare against it. Zero / empty
-        // before the panel resolves.
+
+        // State machine
+        CaseState state;
+        uint8 stallRound; // 0 first attempt, 1 redraw
+
+        // Original arbiter slot
+        address originalArbiter;
+        bytes32 originalCommitHash;
         uint16 originalPercentage;
         bytes32 originalDigest;
-        // Set when status flips to AppealableResolved. Lets the appeal
-        // window run from "panel resolved" rather than the (possibly
-        // already-passed) reveal deadline.
-        uint64 appealDeadline;
+        uint64 originalCommitDeadline;
+        uint64 originalRevealDeadline;
+        bool originalRevealed;
+
+        // Appeal extension (zero unless appeal is filed)
+        address appellant;
+        uint64 appealDeadline; // when the appeal-eligibility window closes
+        AppealSlot[2] appealSlots;
+        uint64 appealCommitDeadline;
+        uint64 appealRevealDeadline;
+        uint256 appealFeeAmount; // held in escrow fee token until distribution
+
+        // Pot accounting
+        uint256 escrowFeeReceived; // populated when applyArbitration returns the fee
+        bool feesDistributed;
     }
 
-    mapping(bytes32 => Case) private _cases;
-    mapping(bytes32 => address[]) private _panels;
-    mapping(bytes32 => mapping(address => Commit)) private _commits;
+    mapping(bytes32 => Case) internal _cases;
+
+    /// @notice Per-party-pair, per-arbiter timestamp of last assignment.
+    /// Used to enforce the 90-day repeat-arbiter cooldown (D13). Keyed
+    /// by `_partyPairKey(partyA, partyB)` so it's symmetric in party
+    /// order.
+    mapping(bytes32 => mapping(address => uint64)) public lastArbitratedAt;
 
     /// @notice Currently-active Aegis case ID for a given
     /// (escrow, escrowCaseId) pair. Set on `openDispute`, cleared on
-    /// resolve / default-resolve. Prevents two keepers from creating
-    /// duplicate cases for the same underlying dispute.
+    /// resolve / default-resolve. Prevents duplicate cases for the
+    /// same underlying dispute.
     mapping(address => mapping(bytes32 => bytes32)) public liveCaseFor;
 
     /// @notice Pull-pattern fee balances. claimable[arbiter][token].
@@ -206,34 +226,12 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
 
     uint256 private _caseNonce;
 
-    // ============================================================
-    // Appeals — second-instance review. Original-panel verdict is
-    // staged in AppealableResolved; either party can appeal within
-    // `policy.appealWindow` by posting `appealBondAmount` ELCP. A
-    // larger panel re-arbitrates; if their median differs from the
-    // original by more than `appealOverturnTolerance` percentage
-    // points, the original panel is slashed and the appeal verdict
-    // applies. Otherwise the original verdict stands and the bond
-    // pays the appeal panel.
-    // ============================================================
-
-    struct Appeal {
-        bool exists;
-        address appellant;
-        uint256 bondAmount;
-        uint64 appealDeadline; // when no-appeal auto-settles the original verdict
-        uint64 deadlineCommit;
-        uint64 deadlineReveal;
-        uint8 panelSize;
-        uint8 commitCount;
-        uint8 revealCount;
-        uint16 originalPercentage;
-        bytes32 originalDigest;
+    /// @notice Canonical-ordered hash of a (partyA, partyB) pair. Used
+    /// as the key for `lastArbitratedAt` so the cooldown is symmetric
+    /// regardless of which side is partyA in a given case.
+    function _partyPairKey(address a, address b) internal pure returns (bytes32) {
+        return a < b ? keccak256(abi.encode(a, b)) : keccak256(abi.encode(b, a));
     }
-
-    mapping(bytes32 => Appeal) public appeals;
-    mapping(bytes32 => address[]) private _appealPanels;
-    mapping(bytes32 => mapping(address => Commit)) private _appealCommits;
 
     // ============================================================
     // Events
@@ -272,29 +270,34 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
         address partyA,
         address partyB,
         address feeToken,
-        uint256 amount,
-        address[] panel
+        uint256 amount
     );
     event VrfConfigUpdated(bytes32 keyHash, uint64 subscriptionId, uint16 confirmations, uint32 callbackGasLimit);
-    event PanelRedrawn(bytes32 indexed caseId, address[] newPanel);
-    event Recused(
-        bytes32 indexed caseId,
-        address indexed recused,
-        address indexed replacement,
-        uint8 seat
-    );
-    event Committed(bytes32 indexed caseId, address indexed panelist, bytes32 commitHash);
+
+    /// @notice Emitted whenever an arbiter is assigned to a case slot
+    /// — original draw, appeal-slot draw, or stall-redraw replacement.
+    /// Phase-agnostic by design (de novo review). The phase is
+    /// recoverable from `_cases[caseId].state` at the time of emit
+    /// but is intentionally NOT in the event payload.
+    event ArbiterDrawn(bytes32 indexed caseId, address indexed arbiter);
+
+    /// @notice Replacement of a previously-assigned arbiter. Triggered
+    /// by recuse or by stall-redraw. Same shape regardless of phase.
+    event ArbiterRedrawn(bytes32 indexed caseId, address indexed previousArbiter, address indexed replacement);
+
+    event Recused(bytes32 indexed caseId, address indexed recused, address indexed replacement);
+    event Committed(bytes32 indexed caseId, address indexed arbiter, bytes32 commitHash);
     event Revealed(
         bytes32 indexed caseId,
-        address indexed panelist,
+        address indexed arbiter,
         uint16 partyAPercentage,
         bytes32 rationaleDigest
     );
-    event PanelStalled(bytes32 indexed caseId, uint8 round, uint256 slashedTotal);
+    event Stalled(bytes32 indexed caseId, uint8 round, uint256 slashedTotal);
     event Slashed(address indexed arbiter, uint256 amount, bytes32 indexed caseId);
     event CaseResolved(
         bytes32 indexed caseId,
-        uint16 medianPercentage,
+        uint16 finalPercentage,
         bytes32 finalDigest
     );
     event CaseDefaultResolved(bytes32 indexed caseId, uint16 fallbackPercentage);
@@ -302,44 +305,27 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
         bytes32 indexed caseId,
         address feeToken,
         uint256 totalReceived,
-        uint256 panelTotal,
+        uint256 arbiterTotal,
+        uint256 partyRebateTotal,
         uint256 treasuryAmount
     );
     event FeesClaimed(address indexed arbiter, address indexed token, uint256 amount);
     event TreasuryWithdrawn(address indexed token, address indexed to, uint256 amount);
 
-    event CaseAppealable(
-        bytes32 indexed caseId,
-        uint16 originalPercentage,
-        bytes32 originalDigest,
-        uint64 appealDeadline
-    );
+    /// @notice Appeal filed by a party. Emits the fee amount in the
+    /// escrow's fee token (not ELCP — the appeal fee is denominated in
+    /// the disputed-amount token under the new design).
     event AppealRequested(
         bytes32 indexed caseId,
         address indexed appellant,
-        uint256 bondAmount,
+        uint256 feeAmount,
+        address feeToken,
         uint256 vrfRequestId
     );
-    event AppealPanelSeated(bytes32 indexed caseId, address[] panel);
-    event AppealCommitted(bytes32 indexed caseId, address indexed panelist, bytes32 commitHash);
-    event AppealRevealed(
-        bytes32 indexed caseId,
-        address indexed panelist,
-        uint16 partyAPercentage,
-        bytes32 rationaleDigest
-    );
-    event AppealUpheld(
-        bytes32 indexed caseId,
-        uint16 originalPercentage,
-        uint16 appealPercentage
-    );
-    event AppealOverturned(
-        bytes32 indexed caseId,
-        uint16 originalPercentage,
-        uint16 appealPercentage,
-        uint256 originalPanelSlashed
-    );
-    event AppealStalled(bytes32 indexed caseId, uint256 slashedTotal);
+
+    /// @notice Pro-rata refund of unspent dispute pot to the prevailing
+    /// party (or split between parties on a compromise verdict). See D1(c).
+    event PartyRebated(bytes32 indexed caseId, address indexed party, address indexed token, uint256 amount);
 
     // ============================================================
     // Errors
