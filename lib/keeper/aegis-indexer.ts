@@ -1,4 +1,3 @@
-import "server-only"
 import {
   createPublicClient,
   http,
@@ -135,7 +134,7 @@ export async function indexAegisEvents(
           break
         }
         case "Revealed": {
-          await applyRevealed(cfg, decoded.args)
+          await applyRevealed(cfg, client, decoded.args)
           break
         }
         case "CaseResolved": {
@@ -448,7 +447,7 @@ async function applyCommitted(cfg: IndexerConfig, args: any, _txHash: Hex) {
     )
 }
 
-async function applyRevealed(cfg: IndexerConfig, args: any) {
+async function applyRevealed(cfg: IndexerConfig, client: any, args: any) {
   const caseUuid = await findCaseUuid(cfg, args.caseId)
   if (!caseUuid) return
   await db
@@ -467,19 +466,39 @@ async function applyRevealed(cfg: IndexerConfig, args: any) {
         ),
       ),
     )
-  // Bump the case status to 'revealing' if still 'open'. Note: under
-  // the new design the Voting state covers both commit + reveal sub-
-  // windows, so we only flip if the DB row reflects the older 'open'
-  // semantic carried over from v0.
+  // The contract's state machine moves the case forward when an arbiter
+  // reveals — original reveal flips Voting → AppealableResolved, the
+  // last appeal-slot reveal flips Voting → AppealableResolved again
+  // (with the median computed). The Revealed event alone doesn't carry
+  // that transition, so we read getCase() and translate the on-chain
+  // state to its DB-status equivalent. Cheaper than maintaining a
+  // separate state-tracker; correctness is checked by the e2e harness.
+  const view = (await client.readContract({
+    address: cfg.aegisAddress,
+    abi: aegisAbi,
+    functionName: "getCase",
+    args: [args.caseId],
+  })) as { state: number; appealDeadline: bigint }
+  // CaseState enum: None=0, AwaitingArbiter=1, Voting=2,
+  // AppealableResolved=3, AwaitingAppealPanel=4, Resolved=5,
+  // Defaulted=6, Canceled=7.
+  const stateToStatus: Record<number, "open" | "revealing" | "appealable_resolved" | "resolved"> = {
+    2: "revealing", // still in Voting after a partial reveal
+    3: "appealable_resolved",
+    5: "resolved",
+  }
+  const next = stateToStatus[view.state]
+  if (!next) return
   await db
     .update(schema.cases)
-    .set({ status: "revealing", updatedAt: new Date() })
-    .where(
-      and(
-        eq(schema.cases.id, caseUuid),
-        eq(schema.cases.status, "open"),
-      ),
-    )
+    .set({
+      status: next,
+      ...(next === "appealable_resolved"
+        ? { medianPercentage: Number(args.partyAPercentage) }
+        : {}),
+      updatedAt: new Date(),
+    })
+    .where(eq(schema.cases.id, caseUuid))
 }
 
 async function applyResolved(

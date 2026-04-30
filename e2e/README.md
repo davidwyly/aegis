@@ -23,10 +23,14 @@ real SIWE auth, real wagmi UI flow via an injected `window.ethereum` shim.
 2. Programmatic SIWE sign-in as the VRF-drawn arbiter.
 3. Visit `/cases/:id`, assert de novo framing copy + "Open · commits" badge.
 4. **Click "Commit vote"** — wagmi sends the tx through the injected wallet.
-   Mirror the indexer's reaction into the DB.
+   Tick the real keeper indexer; the Committed event is mirrored into
+   `panel_members.committedAt` + `commit_hash`.
 5. Reload, assert the commit checklist hint flipped to "Recorded…".
-6. `evm_increaseTime` past the commit window + flip cases.status in DB.
+6. `evm_increaseTime` past the commit window + nudge the DB deadline so
+   the page's phase computation flips (no event for time-only transitions).
 7. **Click "Reveal vote"** — wagmi reads the salt from localStorage.
+   Tick the keeper; `applyRevealed` reads `getCase()` and translates
+   `CaseState.AppealableResolved` into `cases.status`.
 8. Reload, assert "Appeal window" badge.
 
 ### `ui-sign-in.spec.ts`
@@ -37,12 +41,6 @@ lands and `/api/auth/me` confirms it.
 
 ### What's still NOT exercised
 
-- The keeper indexer. State transitions are mirrored into the DB by
-  small inline helpers in `helpers/db.ts`. Booting the keeper as a
-  child process is blocked by `import "server-only"` in keeper modules
-  (would need a custom Node loader to stub it). The keeper has full
-  contract-side coverage in Hardhat tests; integration here is a
-  separate scope.
 - Briefs, evidence, encryption-key configuration — assumed wired up
   before the case is live; specs for those are TODO.
 - Appeal flow (D2 fee pull, D12 winner-block, appeal panel of 3).
@@ -85,14 +83,15 @@ pnpm exec playwright test arbiter-happy-path
   - `wallet-inject.ts` — injects an EIP-1193 provider as `window.ethereum`
     so the wagmi `injected` connector picks it up. Signing is delegated
     to the test process via `page.exposeFunction`.
+  - `keeper.ts` — `tickKeeper(args)` calls `lib/keeper/aegis-indexer`
+    directly. Replaces the manual DB-mirroring helpers from earlier
+    iterations of this harness.
   - `siwe.ts` — programmatic SIWE sign-in (`signInAs(page, privateKey)`)
     when a spec doesn't need the UI sign-in flow.
-  - `onchain.ts` — viem wrappers: `commitVote`, `revealVote`,
-    `advanceTime`. Used when a spec needs to mutate state without
+  - `onchain.ts` — viem wrappers (`commitVote`, `revealVote`,
+    `advanceTime`) used when a spec needs to mutate state without
     going through the UI.
-  - `db.ts` — direct postgres-js seeding + indexer-mirroring helpers
-    (`seedOpenedCase`, `recordCommit`, `recordOriginalReveal`,
-    `wipeDb`).
+  - `db.ts` — `wipeDb` + a tiny `lowerAddress` helper.
   - `fixtures.ts` — `e2e/.fixtures.json` reader/writer.
 
 ### Env contract

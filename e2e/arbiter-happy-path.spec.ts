@@ -5,36 +5,39 @@ import { privateKeyFor } from "./helpers/deploy"
 import { signInAs } from "./helpers/siwe"
 import { injectWallet } from "./helpers/wallet-inject"
 import { advanceTime } from "./helpers/onchain"
-import {
-  recordCommit,
-  recordOriginalReveal,
-  seedOpenedCase,
-  wipeDb,
-} from "./helpers/db"
+import { wipeDb } from "./helpers/db"
+import { tickKeeper } from "./helpers/keeper"
 
 /**
  * Arbiter happy path — drives the actual UI for everything that has a
- * button:
+ * button, and uses the real keeper indexer to mirror chain state into
+ * the DB after each on-chain mutation:
  *
  *   1. Inject window.ethereum (signs with the drawn arbiter's hardhat key).
- *   2. Programmatic SIWE sign-in (skipping the wallet popup is fine here;
- *      the UI sign-in flow is exercised by ui-sign-in.spec.ts).
+ *   2. Programmatic SIWE sign-in. (UI sign-in flow has its own spec.)
  *   3. Visit /cases/:id, assert de novo framing copy + status badge.
  *   4. Click "Commit vote" — wagmi sends the tx through the injected wallet.
- *      Mirror the indexer's reaction in the DB (the keeper itself is
- *      stubbed in this scaffold; see e2e/README.md).
+ *      Tick the keeper so panel_members.committedAt + commitHash land.
  *   5. Reload, assert the commit indicator.
- *   6. evm_increaseTime past the commit window.
- *   7. Click "Reveal vote" — wagmi reads the salt stash from localStorage
- *      and submits revealVote. Mirror appealable_resolved into the DB.
- *   8. Reload, assert the "Appeal window" badge.
+ *   6. evm_increaseTime past the commit window + nudge the DB deadlines
+ *      so the page's phase computation flips.
+ *   7. Click "Reveal vote" — wagmi reads the salt stash from localStorage.
+ *      Tick the keeper so cases.status flips to appealable_resolved.
+ *   8. Reload, assert "Appeal window" badge.
  */
 
 test.describe("arbiter happy path", () => {
   test.beforeEach(async () => {
     const f = readFixtures()
+    // Reset state. After wipe the keeper rebuilds cases + panel_members
+    // by re-scanning all logs from block 0.
     await wipeDb(f.databaseUrl)
-    await seedOpenedCase(f.databaseUrl, f.deployment)
+    await tickKeeper({
+      databaseUrl: f.databaseUrl,
+      chainId: f.deployment.chainId,
+      rpcUrl: f.deployment.rpcUrl,
+      aegisAddress: f.deployment.aegis,
+    })
   })
 
   test("commits and reveals through the UI", async ({ page }) => {
@@ -42,6 +45,12 @@ test.describe("arbiter happy path", () => {
     const { databaseUrl, deployment: d } = f
     const arbiter = d.seededCase.drawnArbiter
     const privateKey = privateKeyFor(arbiter)
+    const indexerArgs = {
+      databaseUrl,
+      chainId: d.chainId,
+      rpcUrl: d.rpcUrl,
+      aegisAddress: d.aegis,
+    }
 
     // Inject wallet BEFORE the first goto so wagmi sees window.ethereum
     // on its first render.
@@ -66,22 +75,14 @@ test.describe("arbiter happy path", () => {
       "Party A's evidence is more credible.",
     )
 
-    // Capture the salt the form generated (it's the second field).
-    const saltField = page.locator('input.font-mono')
-    const salt = await saltField.inputValue()
-
     // Click commit. The wagmi `useWriteContract` call goes through the
-    // injected wallet and lands on chain. We poll for the transaction
-    // submission status the form surfaces.
+    // injected wallet and lands on chain.
     await page.getByRole("button", { name: /commit vote/i }).click()
     await expect(page.getByText(/Commit submitted: 0x/i)).toBeVisible({ timeout: 15_000 })
 
-    // The form stashed the salt + rationale in localStorage so reveal can
-    // replay it. The indexer would now be writing committedAt + commitHash
-    // into panel_members; for the scaffold we mirror that synchronously.
-    const caseUuid = await readSeededCaseUuid(databaseUrl, d.seededCase.aegisCaseId)
-    const commitHash = await readCommitHashOnchain(d.rpcUrl, d.aegis, d.seededCase.aegisCaseId)
-    await recordCommit(databaseUrl, caseUuid, arbiter, commitHash)
+    // Tick the keeper. It picks up the Committed event off-chain and
+    // stamps committedAt + commitHash on the panel_members row.
+    await tickKeeper(indexerArgs)
 
     // Reload, assert the checklist hint flipped to its post-commit text.
     await page.reload()
@@ -90,103 +91,47 @@ test.describe("arbiter happy path", () => {
     // Skip past commit window so the contract accepts reveal.
     await advanceTime(d.rpcUrl, 60 * 60 * 24 + 60)
 
-    // The page now needs to render the reveal-phase form. The form's
-    // `phase` prop is computed server-side from the DB deadline; bump
-    // the DB deadlineCommit into the past so it switches.
-    await advanceCommitWindowInDb(databaseUrl, caseUuid)
+    // The case page derives "phase" from the cases.deadline_commit row,
+    // which the indexer doesn't update from time-only events. Flip the
+    // DB deadline so the UI shows the reveal-phase form.
+    await advanceCommitWindowInDb(databaseUrl, d.seededCase.aegisCaseId)
     await page.reload()
 
     // Click reveal — the form pulls the salt+rationale from localStorage.
     await page.getByRole("button", { name: /reveal vote/i }).click()
     await expect(page.getByText(/Reveal submitted: 0x/i)).toBeVisible({ timeout: 15_000 })
 
-    // Mirror the indexer reaction (Revealed event → AppealableResolved).
-    const rationaleDigest = await readRationaleDigestOnchain(
-      d.rpcUrl,
-      d.aegis,
-      d.seededCase.aegisCaseId,
-    )
-    await recordOriginalReveal(databaseUrl, caseUuid, arbiter, 60, rationaleDigest)
+    // Tick the keeper. Now applyRevealed reads getCase() and translates
+    // the on-chain CaseState.AppealableResolved into the DB status.
+    await tickKeeper(indexerArgs)
 
     await page.reload()
     await expect(page.getByText("Appeal window")).toBeVisible()
-
-    // Sanity: the localStorage stash was the value we saw in the form.
-    void salt
   })
 })
-
-// ─── tiny inline DB helpers used only by this spec ────────────────────
-
-async function readSeededCaseUuid(databaseUrl: string, aegisCaseId: string): Promise<string> {
-  const postgres = (await import("postgres")).default
-  const sql = postgres(databaseUrl, { prepare: false, max: 1 })
-  try {
-    const [row] = await sql<{ id: string }[]>`
-      SELECT id FROM cases WHERE case_id = ${aegisCaseId.toLowerCase()} LIMIT 1
-    `
-    if (!row) throw new Error(`No case row for ${aegisCaseId}`)
-    return row.id
-  } finally {
-    await sql.end({ timeout: 5 })
-  }
-}
 
 /**
  * Force the cases.deadline_commit row backwards in time so the case page's
  * server-side phase computation flips from "commit" to "reveal". The
  * contract on its own accepts the reveal because we already advanced
- * EVM time; this just keeps the UI in sync since the indexer isn't
- * running.
+ * EVM time; this keeps the UI's view of the deadline aligned. The keeper
+ * doesn't update DB deadlines for time-only transitions (no event), so
+ * tests have to nudge it directly.
  */
-async function advanceCommitWindowInDb(databaseUrl: string, caseUuid: string): Promise<void> {
+async function advanceCommitWindowInDb(
+  databaseUrl: string,
+  aegisCaseId: string,
+): Promise<void> {
   const postgres = (await import("postgres")).default
   const sql = postgres(databaseUrl, { prepare: false, max: 1 })
   try {
     await sql`
       UPDATE cases
       SET deadline_commit = NOW() - INTERVAL '1 minute',
-          deadline_reveal = NOW() + INTERVAL '23 hours',
-          status = 'revealing'
-      WHERE id = ${caseUuid}
+          deadline_reveal = NOW() + INTERVAL '23 hours'
+      WHERE case_id = ${aegisCaseId.toLowerCase()}
     `
   } finally {
     await sql.end({ timeout: 5 })
   }
-}
-
-async function readCommitHashOnchain(
-  rpcUrl: string,
-  aegis: `0x${string}`,
-  caseId: `0x${string}`,
-): Promise<`0x${string}`> {
-  const { createPublicClient, http } = await import("viem")
-  const { hardhat } = await import("viem/chains")
-  const { aegisAbi } = await import("@/lib/abi/aegis")
-  const client = createPublicClient({ chain: hardhat, transport: http(rpcUrl) })
-  const view = (await client.readContract({
-    address: aegis,
-    abi: aegisAbi,
-    functionName: "getCase",
-    args: [caseId],
-  })) as { originalCommitHash: `0x${string}` }
-  return view.originalCommitHash
-}
-
-async function readRationaleDigestOnchain(
-  rpcUrl: string,
-  aegis: `0x${string}`,
-  caseId: `0x${string}`,
-): Promise<`0x${string}`> {
-  const { createPublicClient, http } = await import("viem")
-  const { hardhat } = await import("viem/chains")
-  const { aegisAbi } = await import("@/lib/abi/aegis")
-  const client = createPublicClient({ chain: hardhat, transport: http(rpcUrl) })
-  const view = (await client.readContract({
-    address: aegis,
-    abi: aegisAbi,
-    functionName: "getCase",
-    args: [caseId],
-  })) as { originalDigest: `0x${string}` }
-  return view.originalDigest
 }

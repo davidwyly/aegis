@@ -3,7 +3,8 @@ import { test, expect } from "@playwright/test"
 import { readFixtures } from "./helpers/fixtures"
 import { privateKeyFor } from "./helpers/deploy"
 import { injectWallet } from "./helpers/wallet-inject"
-import { wipeDb, seedOpenedCase } from "./helpers/db"
+import { wipeDb } from "./helpers/db"
+import { tickKeeper } from "./helpers/keeper"
 
 /**
  * Drives the SIWE sign-in flow through the UI button rather than the
@@ -18,7 +19,12 @@ test.describe("UI sign-in", () => {
   test.beforeEach(async () => {
     const f = readFixtures()
     await wipeDb(f.databaseUrl)
-    await seedOpenedCase(f.databaseUrl, f.deployment)
+    await tickKeeper({
+      databaseUrl: f.databaseUrl,
+      chainId: f.deployment.chainId,
+      rpcUrl: f.deployment.rpcUrl,
+      aegisAddress: f.deployment.aegis,
+    })
   })
 
   test("clicking Sign in lands an authenticated session", async ({ page }) => {

@@ -94,7 +94,10 @@ pnpm db:studio                      # GUI
 ## Conventions to keep
 
 - `import "server-only"` at the top of any module that touches the DB
-  or holds secrets. Vitest aliases this to a no-op via `test/stubs/`.
+  or holds secrets — EXCEPT keeper modules (`lib/keeper/*`). The keeper
+  is also imported from Node-side test harnesses and from `scripts/keeper.ts`,
+  neither of which run inside Next's RSC environment. Vitest aliases
+  `server-only` to a no-op via `test/stubs/` for everything else.
 - Use `recordCaseOpened` (idempotent via `(chainId, aegisAddress, caseId)`)
   for any new case-import path. Don't insert into `cases` directly.
 - All keeper steps are idempotent and use the `indexer_state` cursor

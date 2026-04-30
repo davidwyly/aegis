@@ -1,19 +1,22 @@
 import { writeFixtures } from "./helpers/fixtures"
 import { startEmbeddedPg, E2E_DATABASE_URL } from "./helpers/pg"
 import { deployFixture } from "./helpers/deploy"
-import { seedOpenedCase, wipeDb } from "./helpers/db"
+import { wipeDb } from "./helpers/db"
+import { tickKeeper } from "./helpers/keeper"
 
 /**
  * Playwright `globalSetup`. Runs once before any spec.
  *
  *   1. Boot embedded postgres on a fixed loopback port.
  *   2. Apply the project's drizzle schema.
- *   3. Deploy Aegis + mocks against the running hardhat node.
- *   4. Open one dispute, fulfill mock VRF, capture the drawn arbiter.
- *   5. Seed the cases + panel_members rows so the UI sees the case
- *      without needing the keeper to index it.
- *   6. Persist all artifact addresses + URLs to e2e/.fixtures.json.
- *   7. Mutate process.env so Playwright's webServer (Next dev) inherits
+ *   3. Set DATABASE_URL so the keeper can read it on first DB call.
+ *   4. Deploy Aegis + mocks against the running hardhat node.
+ *   5. Open one dispute, fulfill mock VRF.
+ *   6. Tick the real keeper indexer — it picks up CaseRequested →
+ *      CaseOpened → ArbiterDrawn from the chain logs and seeds the
+ *      cases + panel_members rows.
+ *   7. Persist artifact addresses + URLs to e2e/.fixtures.json.
+ *   8. Mutate process.env so Playwright's webServer (Next dev) inherits
  *      the right DATABASE_URL + contract addresses.
  *
  * Hardhat is expected to already be running (`pnpm contracts:node` in
@@ -24,17 +27,25 @@ async function globalSetup(): Promise<void> {
   console.log("[e2e] starting embedded postgres + applying schema…")
   await startEmbeddedPg()
 
+  // Set DATABASE_URL early — the keeper's drizzle client reads it on
+  // first lazy access. Same env is inherited by the Next dev server
+  // when Playwright's `webServer` block boots later.
+  process.env.DATABASE_URL = E2E_DATABASE_URL
+
   console.log("[e2e] deploying Aegis + mocks against hardhat…")
   const deployment = await deployFixture()
 
-  console.log("[e2e] wiping DB (clean slate) + seeding the open case…")
+  console.log("[e2e] wiping DB + indexing the open case via the real keeper…")
   await wipeDb(E2E_DATABASE_URL)
-  await seedOpenedCase(E2E_DATABASE_URL, deployment)
+  await tickKeeper({
+    databaseUrl: E2E_DATABASE_URL,
+    chainId: deployment.chainId,
+    rpcUrl: deployment.rpcUrl,
+    aegisAddress: deployment.aegis,
+  })
 
   writeFixtures({ databaseUrl: E2E_DATABASE_URL, deployment })
 
-  // The Next dev server inherits these from the playwright process.
-  process.env.DATABASE_URL = E2E_DATABASE_URL
   process.env.NEXT_PUBLIC_AEGIS_HARDHAT = deployment.aegis
   process.env.NEXT_PUBLIC_VAULTRA_ADAPTER_HARDHAT = deployment.escrow
   process.env.NEXT_PUBLIC_ELCP_HARDHAT = deployment.elcp
