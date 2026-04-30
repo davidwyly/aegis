@@ -12,36 +12,41 @@ full-page PNG. Fast (under 30s), runs against any base URL.
 pnpm exec playwright test smoke
 ```
 
-## arbiter happy path (`arbiter-happy-path.spec.ts`)
+## integration specs
 
 Full integration — embedded postgres, real hardhat, real Aegis contract,
-real SIWE auth.
+real SIWE auth, real wagmi UI flow via an injected `window.ethereum` shim.
 
-### What it exercises
+### `arbiter-happy-path.spec.ts`
 
-1. Programmatic SIWE sign-in as the arbiter that VRF assigned.
-2. Navigate to `/cases/:id`, assert the de novo framing copy ("Case at
-   arbitration", "You have been randomly selected…") and the "Open · commits"
-   status badge.
-3. `commitVote` on-chain via viem; mirror the indexer's reaction in the
-   DB (panel_members.committedAt + commit_hash).
-4. Reload, assert the commit checklist item flips to its checked state.
-5. `evm_increaseTime` past the commit window.
-6. `revealVote` on-chain via viem; mirror the indexer's reaction in the
-   DB (cases.status = `appealable_resolved`).
-7. Reload, assert the "Appeal window" badge.
+1. Inject `window.ethereum` (signs with the drawn arbiter's hardhat key).
+2. Programmatic SIWE sign-in as the VRF-drawn arbiter.
+3. Visit `/cases/:id`, assert de novo framing copy + "Open · commits" badge.
+4. **Click "Commit vote"** — wagmi sends the tx through the injected wallet.
+   Mirror the indexer's reaction into the DB.
+5. Reload, assert the commit checklist hint flipped to "Recorded…".
+6. `evm_increaseTime` past the commit window + flip cases.status in DB.
+7. **Click "Reveal vote"** — wagmi reads the salt from localStorage.
+8. Reload, assert "Appeal window" badge.
 
-### What it does NOT exercise
+### `ui-sign-in.spec.ts`
 
-- The wagmi UI commit/reveal buttons — `commitVote` / `revealVote` are
-  issued from the test process directly. Driving the buttons requires
-  injecting a window.ethereum EIP-1193 mock; that's a follow-up.
+Drives the SignInButton component through wagmi → injected wallet →
+`personal_sign` → `/api/auth/verify`, asserts the iron-session cookie
+lands and `/api/auth/me` confirms it.
+
+### What's still NOT exercised
+
 - The keeper indexer. State transitions are mirrored into the DB by
-  small inline helpers in `helpers/db.ts`. The keeper has its own
-  contract-side coverage in Hardhat tests; integrating it here is a
+  small inline helpers in `helpers/db.ts`. Booting the keeper as a
+  child process is blocked by `import "server-only"` in keeper modules
+  (would need a custom Node loader to stub it). The keeper has full
+  contract-side coverage in Hardhat tests; integration here is a
   separate scope.
 - Briefs, evidence, encryption-key configuration — assumed wired up
   before the case is live; specs for those are TODO.
+- Appeal flow (D2 fee pull, D12 winner-block, appeal panel of 3).
+- Stall round-0 redraw, recuse, governance setPolicy.
 
 ### Prerequisites
 
@@ -77,10 +82,14 @@ pnpm exec playwright test arbiter-happy-path
   - `pg.ts` — embedded-postgres lifecycle + `drizzle-kit push`.
   - `deploy.ts` — viem-based contract deploy + arbiter registration +
     case seed + mock VRF fulfillment.
-  - `siwe.ts` — programmatic SIWE sign-in (`signInAs(page, privateKey)`).
+  - `wallet-inject.ts` — injects an EIP-1193 provider as `window.ethereum`
+    so the wagmi `injected` connector picks it up. Signing is delegated
+    to the test process via `page.exposeFunction`.
+  - `siwe.ts` — programmatic SIWE sign-in (`signInAs(page, privateKey)`)
+    when a spec doesn't need the UI sign-in flow.
   - `onchain.ts` — viem wrappers: `commitVote`, `revealVote`,
-    `advanceTime`. Includes the same keccak hash math the contract
-    uses for commits.
+    `advanceTime`. Used when a spec needs to mutate state without
+    going through the UI.
   - `db.ts` — direct postgres-js seeding + indexer-mirroring helpers
     (`seedOpenedCase`, `recordCommit`, `recordOriginalReveal`,
     `wipeDb`).
@@ -111,9 +120,6 @@ to pick up the new env, or unset `reuseExistingServer` for the run.
   itself does — `initdb` exits with a permission error). Run the suite
   as a normal user. Containers / sandboxes that enforce root will need
   a non-root user added before `pnpm exec playwright test` will work.
-- **wagmi UI flow**: commit/reveal buttons aren't clicked. The transactions
-  are issued from the test process. Adding a `window.ethereum` mock in
-  `page.addInitScript` would let us drive the UI directly.
 
 ### Adding new specs
 
