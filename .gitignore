@@ -26,3 +26,5 @@ Thumbs.db
 /playwright-report/
 /e2e/test-results/
 /e2e/report/
+/e2e/.fixtures.json
+/e2e/.pgdata/

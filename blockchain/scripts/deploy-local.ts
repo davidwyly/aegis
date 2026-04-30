@@ -3,10 +3,11 @@ import { ethers } from "hardhat"
 /**
  * One-shot local-dev deploy. Targets a running hardhat node via:
  *
- *   pnpm -C blockchain hardhat run scripts/deploy-local.ts --network localhost
+ *   pnpm contracts:deploy:local
  *
- * Sets up: ELCP + USDC mocks, Aegis (governance = signer0, treasury = signer1),
- * a MockArbitrableEscrow wired to Aegis, three registered+staked arbiters,
+ * Sets up: ELCP + USDC mocks, a MockVRFCoordinator, Aegis (governance =
+ * signer0, treasury = signer1) under the redesigned Policy struct, a
+ * MockArbitrableEscrow wired to Aegis, three registered+staked arbiters,
  * and a seeded test case so the public ledger isn't empty in dev.
  *
  * Prints env-var lines at the end so you can paste them into `.env.local`.
@@ -38,14 +39,16 @@ async function main() {
       callbackGasLimit: 500_000,
     },
     {
-      panelSize: 3,
-      voteWindow: 60 * 60 * 24,
-      revealWindow: 60 * 60 * 24,
-      graceWindow: 60 * 60 * 12,
+      commitWindow: 60 * 60 * 24, // D7 — 24h
+      revealWindow: 60 * 60 * 24, // D8 — 24h
+      graceWindow: 60 * 60 * 12, // 12h grace before slashing
+      appealWindow: 60 * 60 * 24 * 7, // D9 — 7d
+      repeatArbiterCooldown: 60 * 60 * 24 * 90, // D13 — 90d
       stakeRequirement: STAKE_REQ,
-      panelFeeBps: 8000,
+      appealFeeBps: 250, // D2 — 2.5%
+      perArbiterFeeBps: 250, // D4 — 2.5%
       treasury: treasury.address,
-    }
+    },
   )
   await aegis.waitForDeployment()
 
@@ -71,13 +74,13 @@ async function main() {
     partyB.address,
     await usdc.getAddress(),
     amount,
-    fee
+    fee,
   )
   // Pre-fund the mock with the fee so applyArbitration can pay Aegis.
   await usdc.mint(await mock.getAddress(), fee)
   const openTx = await aegis.openDispute(await mock.getAddress(), caseKey)
   const openReceipt = await openTx.wait()
-  // Drive the mock VRF fulfillment so the panel is seated immediately
+  // Drive the mock VRF fulfillment so the arbiter is seated immediately
   // (no real Chainlink subscription on a local hardhat node).
   const requested = openReceipt!.logs
     .map((l) => {
