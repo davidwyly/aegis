@@ -1,174 +1,19 @@
 import { expect } from "chai"
 import { ethers } from "hardhat"
 import { loadFixture, time } from "@nomicfoundation/hardhat-network-helpers"
-import type {
-  Aegis,
-  VaultraAdapter,
-  VaultraEscrow,
-  MockUSDC,
-  MockERC20,
-  MockVRFCoordinator,
-} from "../typechain-types"
-import type { Signer } from "ethers"
+import {
+  VAULTRA_FEE_BPS,
+  VAULTRA_FEE_DENOM,
+  VAULTRA_STATUS_COMPLETED,
+  VAULTRA_STATUS_DISPUTED,
+  VOTE_WINDOW,
+  createAndFundEscrow,
+  deployIntegrationStack,
+  disputeCollateral,
+  usdc,
+} from "./helpers/integrationFixture"
 
-const VRF_KEY_HASH =
-  "0x0000000000000000000000000000000000000000000000000000000000000001"
-const VRF_SUB_ID = 1n
-const VRF_CONFIRMATIONS = 3
-const VRF_CALLBACK_GAS = 500_000
-
-// VaultraEscrow numeric encodings
-const VAULTRA_STATUS_ACTIVE = 0n
-const VAULTRA_STATUS_COMPLETED = 1n
-const VAULTRA_STATUS_DISPUTED = 2n
-
-const VOTE_WINDOW = 60 * 60 * 24
-const REVEAL_WINDOW = 60 * 60 * 24
-const GRACE_WINDOW = 60 * 60 * 12
-const STAKE_REQ = ethers.parseEther("100")
-const PANEL_FEE_BPS = 8000
-
-const usdc = (n: string) => ethers.parseUnits(n, 6)
-
-// Mirror Vaultra's fee math (lines 14-27 of VaultraEscrow.sol)
-const VAULTRA_FEE_BPS = 25n
-const VAULTRA_FEE_DENOM = 1000n
-const platformFee = (amount: bigint) => (amount * VAULTRA_FEE_BPS) / VAULTRA_FEE_DENOM
-const disputeCollateral = (amount: bigint) => (amount * VAULTRA_FEE_BPS) / VAULTRA_FEE_DENOM
-const totalUpfront = (amount: bigint) => amount + platformFee(amount) + disputeCollateral(amount)
-
-const PROPOSAL_DIGEST = ethers.keccak256(ethers.toUtf8Bytes("integration-proposal"))
-
-async function fixture() {
-  const signers = await ethers.getSigners()
-  const [governance, treasury, vaultraOwner, client, worker, ...rest] = signers
-  const arbiterSigners = rest.slice(0, 6)
-
-  // ── Tokens ────────────────────────────────────────────────────────
-  const USDC = await ethers.getContractFactory("MockUSDC")
-  const usdcToken = (await USDC.deploy()) as unknown as MockUSDC
-  await usdcToken.waitForDeployment()
-
-  const ELCP = await ethers.getContractFactory("MockERC20")
-  const elcpToken = (await ELCP.deploy("Eclipse", "ELCP", 18)) as unknown as MockERC20
-  await elcpToken.waitForDeployment()
-
-  // ── VRF coordinator (mock) ───────────────────────────────────────
-  const Coord = await ethers.getContractFactory("MockVRFCoordinator")
-  const coordinator = (await Coord.deploy()) as unknown as MockVRFCoordinator
-  await coordinator.waitForDeployment()
-
-  // ── Aegis ─────────────────────────────────────────────────────────
-  const Aegis = await ethers.getContractFactory("Aegis")
-  const aegis = (await Aegis.deploy(
-    governance.address,
-    await elcpToken.getAddress(),
-    await coordinator.getAddress(),
-    {
-      keyHash: VRF_KEY_HASH,
-      subscriptionId: VRF_SUB_ID,
-      requestConfirmations: VRF_CONFIRMATIONS,
-      callbackGasLimit: VRF_CALLBACK_GAS,
-    },
-    {
-      commitWindow: VOTE_WINDOW,
-      revealWindow: REVEAL_WINDOW,
-      graceWindow: GRACE_WINDOW,
-      appealWindow: 60 * 60 * 24 * 7, // 7 days, D9
-      repeatArbiterCooldown: 60 * 60 * 24 * 90, // 90 days, D13
-      stakeRequirement: STAKE_REQ,
-      appealFeeBps: 250, // 2.5%, D2
-      perArbiterFeeBps: 250, // 2.5%, D4
-      treasury: treasury.address,
-    }
-  )) as unknown as Aegis
-  await aegis.waitForDeployment()
-
-  // ── Vaultra ──────────────────────────────────────────────────────
-  // We deploy Vaultra with a placeholder eclipseDAO, then update it to the
-  // adapter once the adapter exists. (Adapter needs vaultra's address at
-  // construction.)
-  const Vaultra = await ethers.getContractFactory("VaultraEscrow")
-  const placeholderDAO = vaultraOwner.address // safe placeholder, not arbiter for any real escrow
-  const vaultra = (await Vaultra.deploy(
-    await usdcToken.getAddress(),
-    placeholderDAO,
-    vaultraOwner.address
-  )) as unknown as VaultraEscrow
-  await vaultra.waitForDeployment()
-
-  // ── Adapter ──────────────────────────────────────────────────────
-  const Adapter = await ethers.getContractFactory("VaultraAdapter")
-  const adapter = (await Adapter.deploy(
-    await aegis.getAddress(),
-    await vaultra.getAddress()
-  )) as unknown as VaultraAdapter
-  await adapter.waitForDeployment()
-
-  // Wire Vaultra's eclipseDAO to the adapter (Ownable2Step → set then
-  // any address is fine since we only need eclipseDAO updated, not ownership).
-  await vaultra.connect(vaultraOwner).updateEclipseDAO(await adapter.getAddress())
-
-  // ── Roster: register + stake 6 arbiters so we have plenty for redraws ──
-  for (const a of arbiterSigners) {
-    await elcpToken.mint(a.address, ethers.parseEther("10000"))
-    await elcpToken.connect(a).approve(await aegis.getAddress(), ethers.MaxUint256)
-    await aegis.connect(governance).registerArbiter(a.address, ethers.ZeroHash)
-    await aegis.connect(a).stake(STAKE_REQ)
-  }
-
-  // Fund the client.
-  await usdcToken.mint(client.address, usdc("1000000"))
-
-  return {
-    aegis,
-    coordinator,
-    adapter,
-    vaultra,
-    usdcToken,
-    elcpToken,
-    governance,
-    treasury,
-    vaultraOwner,
-    client,
-    worker,
-    arbiterSigners,
-  }
-}
-
-async function createAndFundEscrow(
-  vaultra: VaultraEscrow,
-  usdcToken: MockUSDC,
-  client: Signer,
-  worker: Signer,
-  amount: bigint
-): Promise<string> {
-  const clientAddr = await client.getAddress()
-  const workerAddr = await worker.getAddress()
-  await usdcToken.connect(client).approve(await vaultra.getAddress(), totalUpfront(amount))
-  const tx = await vaultra
-    .connect(client)
-    .createEscrow(
-      "integration",
-      "round-trip test",
-      workerAddr,
-      ethers.ZeroAddress, // arbiter = adapter via eclipseDAO default
-      amount,
-      PROPOSAL_DIGEST
-    )
-  const receipt = await tx.wait()
-  const log = receipt!.logs
-    .map((l) => {
-      try {
-        return vaultra.interface.parseLog(l)
-      } catch {
-        return null
-      }
-    })
-    .find((e) => e?.name === "EscrowCreated")
-  void clientAddr
-  return log!.args.escrowId as string
-}
+const fixture = deployIntegrationStack
 
 describe("Aegis ↔ VaultraEscrow integration", () => {
   it("real Vaultra dispute → Aegis single-arbiter verdict → on-chain settlement", async () => {
