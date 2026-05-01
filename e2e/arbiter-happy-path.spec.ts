@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test"
+import postgres from "postgres"
 
 import { readFixtures } from "./helpers/fixtures"
 import { privateKeyFor } from "./helpers/deploy"
@@ -122,7 +123,6 @@ async function advanceCommitWindowInDb(
   databaseUrl: string,
   aegisCaseId: string,
 ): Promise<void> {
-  const postgres = (await import("postgres")).default
   const sql = postgres(databaseUrl, { prepare: false, max: 1 })
   try {
     await sql`

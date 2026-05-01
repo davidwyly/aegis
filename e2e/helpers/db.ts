@@ -1,5 +1,4 @@
 import postgres from "postgres"
-import type { Address, Hex } from "viem"
 
 /**
  * Wipe all e2e data — called between specs to keep tests independent.
@@ -24,11 +23,4 @@ export async function wipeDb(databaseUrl: string): Promise<void> {
   } finally {
     await sql.end({ timeout: 5 })
   }
-}
-
-// Re-exported so any future spec that needs raw lower() can avoid duplicating
-// it. (The previous direct seeder + indexer-mirror helpers have been removed
-// — both are now handled by the real keeper via `tickKeeper` in helpers/keeper.ts.)
-export function lowerAddress(value: Address | Hex): string {
-  return value.toLowerCase()
 }
