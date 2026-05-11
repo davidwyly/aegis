@@ -61,7 +61,7 @@ function railCountdown(args: {
       : revealMs !== null && now < revealMs
         ? revealMs
         : null
-  if (target === null) return { label: "Closed in", value: "closed", deadlineMs: null }
+  if (target === null) return { label: "Closed", value: "", deadlineMs: null }
   const ms = target - now
   const totalMin = Math.floor(ms / 60_000)
   const days = Math.floor(totalMin / (60 * 24))

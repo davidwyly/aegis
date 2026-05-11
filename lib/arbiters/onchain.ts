@@ -1,5 +1,5 @@
 import "server-only"
-import { createPublicClient, http } from "viem"
+import { createPublicClient, erc20Abi, http } from "viem"
 import { supportedChains } from "@/lib/chains"
 import { aegisAbi } from "@/lib/abi/aegis"
 
@@ -53,5 +53,30 @@ export async function readClaimable(
     })) as bigint
   } catch {
     return 0n
+  }
+}
+
+export async function readTokenMetadata(
+  chainId: number,
+  token: `0x${string}`,
+): Promise<{ symbol: string; decimals: number } | null> {
+  const client = publicClientFor(chainId)
+  if (!client) return null
+  try {
+    const [symbol, decimals] = await Promise.all([
+      client.readContract({
+        address: token,
+        abi: erc20Abi,
+        functionName: "symbol",
+      }) as Promise<string>,
+      client.readContract({
+        address: token,
+        abi: erc20Abi,
+        functionName: "decimals",
+      }) as Promise<number>,
+    ])
+    return { symbol, decimals }
+  } catch {
+    return null
   }
 }

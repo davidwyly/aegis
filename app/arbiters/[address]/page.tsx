@@ -6,7 +6,11 @@ import { ConfigureEncryption } from "@/components/configure-encryption"
 import { StakeForm } from "@/components/stake-form"
 import { ClaimButton } from "@/components/claim-button"
 import { getChainData, getExplorerAddressUrl } from "@/lib/chains"
-import { readLockedStake, readClaimable } from "@/lib/arbiters/onchain"
+import {
+  readLockedStake,
+  readClaimable,
+  readTokenMetadata,
+} from "@/lib/arbiters/onchain"
 import { getSession } from "@/lib/auth/session"
 import { db, schema } from "@/lib/db/client"
 import { and, eq, inArray } from "drizzle-orm"
@@ -71,6 +75,8 @@ export default async function ArbiterProfilePage({
     aegisAddress: `0x${string}`
     feeToken: `0x${string}`
     amount: bigint
+    tokenSymbol: string
+    tokenDecimals: number
   }
   let stakeRows: StakeRow[] = []
   let claimRows: ClaimRow[] = []
@@ -120,17 +126,23 @@ export default async function ArbiterProfilePage({
     const claimQueries = Array.from(tokenPairs.values()).map(async (p) => {
       const aegisAddress = getChainData(p.chainId).aegis
       if (!aegisAddress) return null
-      const amount = await readClaimable(
-        p.chainId,
-        aegisAddress,
-        address as `0x${string}`,
-        p.feeToken as `0x${string}`,
-      )
+      const tokenAddress = p.feeToken as `0x${string}`
+      const [amount, tokenMeta] = await Promise.all([
+        readClaimable(
+          p.chainId,
+          aegisAddress,
+          address as `0x${string}`,
+          tokenAddress,
+        ),
+        readTokenMetadata(p.chainId, tokenAddress),
+      ])
       return {
         chainId: p.chainId,
         aegisAddress,
-        feeToken: p.feeToken as `0x${string}`,
+        feeToken: tokenAddress,
         amount,
+        tokenSymbol: tokenMeta?.symbol ?? tokenAddress.slice(0, 10),
+        tokenDecimals: tokenMeta?.decimals ?? 18,
       } satisfies ClaimRow
     })
     claimRows = (await Promise.all(claimQueries)).filter(
@@ -296,6 +308,8 @@ export default async function ArbiterProfilePage({
                     aegisAddress={r.aegisAddress}
                     token={r.feeToken}
                     amount={r.amount}
+                    tokenSymbol={r.tokenSymbol}
+                    tokenDecimals={r.tokenDecimals}
                   />
                 </li>
               ))}
