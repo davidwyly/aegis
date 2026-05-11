@@ -63,18 +63,19 @@ export async function readTokenMetadata(
   const client = publicClientFor(chainId)
   if (!client) return null
   try {
-    const [symbol, decimals] = await Promise.all([
-      client.readContract({
-        address: token,
-        abi: erc20Abi,
-        functionName: "symbol",
-      }) as Promise<string>,
-      client.readContract({
-        address: token,
-        abi: erc20Abi,
-        functionName: "decimals",
-      }) as Promise<number>,
-    ])
+    const symbol = await client.readContract({
+      address: token,
+      abi: erc20Abi,
+      functionName: "symbol",
+    })
+    const decimals = await client.readContract({
+      address: token,
+      abi: erc20Abi,
+      functionName: "decimals",
+    })
+    if (typeof symbol !== "string" || typeof decimals !== "number") {
+      return null
+    }
     return { symbol, decimals }
   } catch {
     return null

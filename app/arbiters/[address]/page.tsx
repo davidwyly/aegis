@@ -141,7 +141,7 @@ export default async function ArbiterProfilePage({
         aegisAddress,
         feeToken: tokenAddress,
         amount,
-        tokenSymbol: tokenMeta?.symbol ?? tokenAddress.slice(0, 10),
+        tokenSymbol: tokenMeta?.symbol ?? tokenAddress,
         tokenDecimals: tokenMeta?.decimals ?? 18,
       } satisfies ClaimRow
     })
