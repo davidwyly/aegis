@@ -356,10 +356,11 @@ export const evidenceFiles = pgTable(
     uploaderAddress: text("uploader_address").notNull(),
     role: text("role").notNull(), // 'partyA' | 'partyB'
     fileName: text("file_name").notNull(),
-    // Free-form group/folder label chosen by the uploader so multi-file
-    // submissions can be organised (e.g. "documents", "media", "exhibits").
-    // Null/empty renders as "uncategorised" in the UI and lands at the
-    // ZIP root. UI offers a few suggestions; server doesn't constrain.
+    // Group/folder label chosen by the uploader so multi-file submissions
+    // can be organised (e.g. "documents", "media", "exhibits"). Null/empty
+    // renders as the "uncategorised" bucket in both the UI and ZIP
+    // bundle. Server sanitises to filename-safe characters [A-Za-z0-9._-]
+    // and clamps to 64 chars (see trimGroupName in lib/cases/evidence.ts).
     groupName: text("group_name"),
     mimeType: text("mime_type").notNull(),
     size: integer("size").notNull(),

@@ -1,6 +1,6 @@
 import "server-only"
 import { createHash } from "node:crypto"
-import { eq, and, inArray } from "drizzle-orm"
+import { eq, inArray } from "drizzle-orm"
 import { db, schema } from "@/lib/db/client"
 
 export const EVIDENCE_MAX_BYTES = 2 * 1024 * 1024 // 2 MB
@@ -71,7 +71,9 @@ const trimFilename = (name: string) =>
 
 const trimGroupName = (name: string | null | undefined): string | null => {
   if (!name) return null
-  const cleaned = name.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 64)
+  const trimmed = name.trim()
+  if (trimmed.length === 0) return null
+  const cleaned = trimmed.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 64)
   return cleaned.length === 0 ? null : cleaned
 }
 
@@ -230,8 +232,6 @@ export async function downloadEvidence(
     content: row.content,
   }
 }
-
-void and
 
 export interface EvidenceWithContent extends EvidenceListItem {
   content: Buffer

@@ -277,7 +277,9 @@ export function EvidencePanel({
       ) : (
         <div className="space-y-3">
           {groupItems(items).map(({ group, files }) => (
-            <div key={group ?? "__none__"}>
+            // Prefix the key so it can't collide with a user-chosen group
+            // name (the sanitiser allows underscores).
+            <div key={`g:${group ?? ""}`}>
               <div className="flex items-baseline justify-between border-b border-zinc-200 pb-1 dark:border-zinc-800">
                 <span className="text-xs font-medium uppercase tracking-wider text-zinc-500">
                   {group ?? UNCATEGORISED_LABEL}
