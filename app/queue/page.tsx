@@ -2,6 +2,7 @@ import Link from "next/link"
 import { listQueueFor } from "@/lib/arbiters/queue"
 import { getSession } from "@/lib/auth/session"
 import { CaseStatusBadge } from "@/components/case-status-badge"
+import { readArbiterProfile } from "@/lib/arbiters/profile"
 
 export const dynamic = "force-dynamic"
 
@@ -32,8 +33,11 @@ export default async function QueuePage() {
 
   let items: Awaited<ReturnType<typeof listQueueFor>> = []
   let dbError: string | null = null
+  let encryptionConfigured = false
   try {
     items = await listQueueFor(session.address)
+    const profile = await readArbiterProfile(session.address)
+    encryptionConfigured = profile.encryptionPubkey !== null
   } catch (err) {
     dbError = err instanceof Error ? err.message : String(err)
   }
@@ -43,10 +47,31 @@ export default async function QueuePage() {
       <div>
         <h1 className="text-2xl font-semibold tracking-tight">My queue</h1>
         <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
-          Cases you&apos;re on as a panelist (original + appeal phases).
-          Recused / redrawn assignments are not shown.
+          Cases where you&apos;re the assigned arbiter. Recused or
+          redrawn assignments are not shown.
         </p>
       </div>
+
+      {/* UX invariant #4 — an arbiter without an encryption key cannot
+          decrypt encrypted briefs and will blind-vote. Surface as an
+          unmissable amber banner until they configure one. */}
+      {!dbError && !encryptionConfigured && (
+        <div className="card border-amber-300 bg-amber-50 text-sm text-amber-900 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-200">
+          <p className="font-medium">
+            You haven&apos;t set up your encryption key.
+          </p>
+          <p className="mt-1 text-xs">
+            Without a key you won&apos;t be able to read encrypted briefs
+            on cases you&apos;re drawn for — and blind-voting risks a slash.
+          </p>
+          <Link
+            href={`/arbiters/${session.address}`}
+            className="mt-2 inline-block text-xs font-medium underline hover:no-underline"
+          >
+            Configure encryption →
+          </Link>
+        </div>
+      )}
 
       {dbError && (
         <div className="card border-rose-300 bg-rose-50 text-sm text-rose-900 dark:border-rose-800 dark:bg-rose-950/50 dark:text-rose-200">
@@ -65,9 +90,11 @@ export default async function QueuePage() {
         <div className="card overflow-x-auto">
           <table className="w-full text-sm">
             <thead className="text-xs text-zinc-500">
+              {/* No Phase column per de novo enforcement
+                  (ux-design.md "queue rows are intentionally
+                  undifferentiated. No Original / Appeal labels"). */}
               <tr>
                 <th className="pb-2 pr-4 text-left font-normal">Status</th>
-                <th className="pb-2 pr-4 text-left font-normal">Phase</th>
                 <th className="pb-2 pr-4 text-left font-normal">Case</th>
                 <th className="pb-2 pr-4 text-left font-normal">Parties</th>
                 <th className="pb-2 pr-4 text-right font-normal">Seat</th>
@@ -94,9 +121,8 @@ export default async function QueuePage() {
                     className="border-t border-zinc-200 dark:border-zinc-800"
                   >
                     <td className="py-2 pr-4">
-                      <CaseStatusBadge status={it.status} />
+                      <CaseStatusBadge status={it.status} forArbiter />
                     </td>
-                    <td className="py-2 pr-4 text-xs">{it.phase}</td>
                     <td className="py-2 pr-4">
                       <Link
                         href={`/cases/${it.caseUuid}`}

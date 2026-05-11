@@ -80,12 +80,18 @@ export async function assembleTimeline(
   const isResolved =
     c.status === "resolved" || c.status === "default_resolved"
 
+  // D13 soft anonymity — public observers see panel timing events
+  // (seat positions, timestamps) but NOT the panelist addresses while
+  // the case is in flight. Parties / panelists / post-resolution
+  // viewers see the real address (they need to in order to do their job
+  // or audit the verdict after the fact).
+  const showPanelistAddress = opts.includePrivate || isResolved
   for (const p of panelRows) {
     if (p.joinedAt) {
       events.push({
         kind: "panelist_joined",
         at: p.joinedAt,
-        actor: p.panelistAddress,
+        actor: showPanelistAddress ? p.panelistAddress : null,
         detail: { seat: p.seat },
       })
     }
@@ -93,7 +99,7 @@ export async function assembleTimeline(
       events.push({
         kind: "panelist_committed",
         at: p.committedAt,
-        actor: p.panelistAddress,
+        actor: showPanelistAddress ? p.panelistAddress : null,
         detail: { seat: p.seat },
       })
     }
@@ -101,7 +107,7 @@ export async function assembleTimeline(
       events.push({
         kind: "panelist_revealed",
         at: p.revealedAt,
-        actor: p.panelistAddress,
+        actor: showPanelistAddress ? p.panelistAddress : null,
         detail: {
           seat: p.seat,
           // Hide vote details until the case is resolved publicly, even
@@ -117,7 +123,7 @@ export async function assembleTimeline(
       events.push({
         kind: "panelist_left",
         at: p.leftAt,
-        actor: p.panelistAddress,
+        actor: showPanelistAddress ? p.panelistAddress : null,
         detail: { seat: p.seat, reason: p.leftReason },
       })
     }

@@ -23,6 +23,14 @@ progressive disclosure of commit vs reveal, etc.) can be tweaked
 during build, but the overall density, palette, framing copy, and
 salt-recovery flow are the reference.
 
+The mockup predates the single-arbiter + appeal-of-3 redesign
+(`docs/arbitration-redesign.md`), so any "arbiter 1 of 3" /
+panel-size copy in it is schematic; the contract's current model
+is round-0 single arbiter, appeal-of-3 if appealed. The 2-column
+shell, right-rail card stack (case details / your status / what
+to do / need help), salt-recovery banner, and density rules are
+still the canonical reference.
+
 ## Design language
 
 Aegis is a **court**, not a marketing site. The vibe is text-dense,
@@ -272,7 +280,26 @@ differently for the three viewer types: **public visitor**,
   "Alice ↔ Bob · 1,000 USDC · Vaultra escrow".
 - Status badge in the top right.
 
-The shell is the same. The body splits:
+**Layout** (lg+): main column + right rail (`<aside>`). Below `lg`
+the rail collapses under the main column.
+
+- Right rail (all viewers, always rendered):
+  1. **Closes in** — large mono countdown (`3d 14h`, `47m`). Shows
+     the active phase's deadline; collapses to "Resolved" or
+     "Awaiting panel" when there's nothing to count down to.
+  2. **You are** — one of `Party` / `Panelist` / `Observer`.
+  3. **Case details** — case ID, chain, disputed amount, commit /
+     reveal deadlines, verdict + final digest post-resolution. Round
+     and panel size are hidden from assigned arbiters (they leak
+     phase context).
+  4. **What to do** — role-specific. For arbiters, the
+     `<ArbiterChecklist>` with encryption-setup / brief-reading /
+     commit / save-salt / reveal steps. For parties and observers,
+     a short bullet list explaining what happens next.
+  5. **Need help?** — link to `docs/integration-vaultra.md` and
+     the `aegis` issue tag.
+
+The main column body splits by viewer type:
 
 #### Party view
 

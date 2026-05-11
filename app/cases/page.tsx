@@ -25,6 +25,20 @@ function shortAddr(a: string) {
   return `${a.slice(0, 6)}…${a.slice(-4)}`
 }
 
+// "Xm ago" / "Xh ago" / "Xd ago" — server-rendered, refreshes on
+// each request. Cases older than 30d show the date.
+function relativeTime(d: Date | string, now: number): string {
+  const ms = now - new Date(d).getTime()
+  const totalMin = Math.floor(ms / 60_000)
+  if (totalMin < 1) return "just now"
+  if (totalMin < 60) return `${totalMin}m ago`
+  const totalHr = Math.floor(totalMin / 60)
+  if (totalHr < 24) return `${totalHr}h ago`
+  const totalDay = Math.floor(totalHr / 24)
+  if (totalDay < 30) return `${totalDay}d ago`
+  return new Date(d).toLocaleDateString()
+}
+
 export default async function CasesLedgerPage({
   searchParams,
 }: {
@@ -56,6 +70,8 @@ export default async function CasesLedgerPage({
   }
 
   // Build the next-page URL preserving filters.
+  const renderNow = Date.now()
+
   const buildUrl = (cur: string | null) => {
     const usp = new URLSearchParams()
     for (const s of status) usp.append("status", s)
@@ -154,8 +170,13 @@ export default async function CasesLedgerPage({
                 </div>
               </div>
               <div className="text-right text-xs text-zinc-500">
-                <div>round {c.round}</div>
-                <div>panel {c.panelSize}</div>
+                <div className="font-mono text-sm text-zinc-700 dark:text-zinc-300">
+                  {c.amount}
+                </div>
+                <div>{relativeTime(c.openedAt, renderNow)}</div>
+                <div>
+                  r{c.round} · panel {c.panelSize}
+                </div>
                 {c.medianPercentage !== null && (
                   <div>verdict {c.medianPercentage}/100</div>
                 )}
