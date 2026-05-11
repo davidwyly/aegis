@@ -6,12 +6,13 @@ address to a deployed `Aegis` contract. Built first to back Vaultra;
 the `IArbitrableEscrow` interface keeps it open to any other escrow
 protocol.
 
-> Status: **v0.4 / pre-audit.** 44 contract tests + 26 service-layer
-> tests + end-to-end integration with real VaultraEscrow all passing.
-> 7 security findings closed (1 HIGH, 4 MEDIUM, 2 LOW); **0 MEDIUM
-> remaining**. Production deploy still requires an external audit and
-> a live Chainlink VRF subscription on the target chain — see
-> `docs/security-review.md` and `docs/integration-vaultra.md`.
+> Status: **v0.5 / pre-audit.** Single-arbiter + appeal-of-3 redesign,
+> 31 contract specs passing (+2 fork-gated), 26 service-layer specs,
+> end-to-end integration with real VaultraEscrow. In-house pre-audit
+> closed 2 HIGH, 4 MEDIUM, 4 LOW; **0 actionable findings open**.
+> Production deploy still requires an external audit and a live
+> Chainlink VRF subscription on the target chain — see
+> `docs/security-review-redesign.md` and `docs/integration-vaultra.md`.
 
 ## What it does
 
@@ -185,8 +186,9 @@ pnpm keeper
 ## Tests
 
 ```bash
-pnpm contracts:test          # 44 hardhat specs (Aegis + Vaultra integration + appeals)
+pnpm contracts:test          # 31 hardhat specs (+2 pending on fork RPC)
 pnpm test                    # 26 vitest tests (auth, brief schema, rate-limit, crypto)
+pnpm e2e                     # Playwright integration (needs `pnpm contracts:node` running)
 pnpm typecheck               # cold ~30-60s on WSL2; warm ~3s
 pnpm build                   # production Next.js build
 ```

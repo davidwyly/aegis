@@ -1,5 +1,177 @@
 # Changelog
 
+## v0.5.0 — single-arbiter + appeal-of-3 redesign + audit pass (unreleased)
+
+### Contract redesign
+
+- Moved from a 3-panelist round-0 panel to **single-arbiter round 0,
+  appeal-of-3** (spec frozen in `docs/arbitration-redesign.md`). Round 0
+  draws one arbiter; if either party appeals, two more are drawn and the
+  three-way median becomes the verdict.
+- `Aegis.sol` rewritten end-to-end (~1488 lines vs the v0 ~1637 lines).
+  Spec decisions D1–D16 are referenced inline in the contract.
+- `policy` struct compacted: appeal-time parameters (`appealFeeBps`,
+  `appealWindow`, `repeatArbiterCooldown`) merged in; ELCP appeal bonds
+  removed in favor of escrow-fee-token appeal fees (D2).
+- `forceCancelStuck` escape hatch (H-02) for VRF-stuck cases —
+  governance-only, time-gated, can refund the escrow's fee deposit.
+
+### Audit pass
+
+In-house pre-audit on the redesigned contract — see
+`docs/security-review-redesign.md`.
+
+| ID | Severity | Status |
+|---|---|---|
+| H-01 | HIGH   | Fixed — pot-share floor on `perArbiterFeeBps` |
+| H-02 | HIGH   | Fixed — `forceCancelStuck` escape hatch + 5 tests |
+| M-01 | MEDIUM | Fixed — `_settleAppeal` pays both panelists pro-rata |
+| M-02 | MEDIUM | Fixed — re-confirmed reentrancy guards on external call |
+| M-03 | MEDIUM | Fixed — `_arbiterList` iteration cost notes added |
+| M-04 | MEDIUM | Fixed — `recuse()` replacement draw mixes case salt |
+| L-01..L-04 | LOW | Fixed |
+
+Older `docs/security-review.md` (the v0 review) is superseded; its
+trust assumptions still apply.
+
+### Frontend de novo pass
+
+- Case workspace rewritten so an assigned arbiter sees only the briefs,
+  evidence, deadline, and commit/reveal form — never the panel listing,
+  the timeline, prior verdicts, or any "original vs appeal" labeling
+  (UX invariant #1 in `docs/ux-design.md`).
+- Right-rail arbiter checklist (`<ArbiterChecklist>`) drives
+  encryption-setup gating + commit / reveal / save-recovery-file steps.
+- Sticky salt-recovery banner (`<SaltRecoveryBanner>`) for arbiters
+  who've committed but haven't downloaded their recovery file.
+- Appeal button (`<AppealButton>`) enforces D12 (full winners can't
+  appeal) and now reads `appealFeeBps` from `policy()` on-chain rather
+  than the spec-frozen default.
+- New: `<EvidencePanel>`, `<EncryptedBriefViewer>`, `<ConfigureEncryption>`,
+  `<CommitRevealForm>` (single unified form for original + appeal slots),
+  `<CaseStatusBadge>` (renders generic "voting" labels for arbiters).
+
+### E2E integration harness
+
+- Playwright suite under `e2e/` boots a real `hardhat node`, an embedded
+  postgres, deploys + seeds, and drives the wagmi UI through an injected
+  `window.ethereum` shim.
+- Specs: `smoke.spec.ts` (route snapshots, no chain), `ui-sign-in.spec.ts`
+  (SIWE flow), `arbiter-happy-path.spec.ts` (commit/reveal end-to-end
+  via the real keeper indexer).
+- Base Sepolia fork integration test added (Hardhat) — exercises real
+  external chain state against the redesigned contracts.
+
+### Test coverage
+
+- Hardhat: 28 specs in `Aegis.test.ts` + integration suites covering
+  appeal flow (E3 partial-reveal, E4 full-fail), round-0 redraw,
+  round-1 default, recusal + D13 cooldown + D12 full-winner exclusion.
+- Vitest: 26 service-layer specs across SIWE, rate-limit, brief schema,
+  and seal crypto round-trip.
+
+### Arbiter self-profile
+
+- New **Stake management** section on `/arbiters/[address]` when the
+  signed-in wallet matches the address. Shows staked / locked / free
+  ELCP per chain and exposes `<StakeForm>` (approve → stake) and
+  unstake actions (guarded client-side against the lockedStake
+  invariant in addition to the contract check).
+- New **Pending claims** section listing every (chain, fee-token)
+  the arbiter has a non-zero `claimable` balance for, with a
+  `<ClaimButton>` per row.
+- New `lib/arbiters/onchain.ts` reader for `lockedStake(arbiter)` and
+  `claimable(arbiter, token)` — falls back to 0 on RPC failure.
+
+### Layout — case workspace 2-column shell
+
+- `app/cases/[id]/page.tsx` restructured into `main` + `aside`. The
+  rail renders five cards (Closes in / You are / Case details / What
+  to do / Need help?) for every viewer type. Round and panel size
+  are suppressed in the rail for assigned arbiters (de novo
+  blindness — they leak original-vs-appeal phase context).
+- The old "Your vote" sub-grid that held `<ArbiterChecklist>` is
+  gone; the checklist now lives in the rail's "What to do" card and
+  serves party / observer roles with appropriate copy too.
+
+### UX invariant pass
+
+- **#1 de novo blindness** — original verdict + final digest are now
+  hidden in the case-workspace rail when the viewer is an assigned
+  arbiter and the case hasn't resolved. Previously an appeal arbiter
+  would see the original arbiter's median in the rail's `Verdict`
+  field, biasing them before commit.
+- **#2 salt persistence** — the reveal form now loads the commit
+  stash from `localStorage` on mount and surfaces a "paste recovery
+  file" fallback when the stash is missing (different device).
+  Accepts both the localStorage shape and the downloaded recovery
+  JSON from `<SaltRecoveryBanner>`.
+- **#3 deadline urgency** — countdown text color escalates zinc →
+  amber (under 6h) → red (under 1h) so an arbiter doesn't need to
+  parse the digits to feel the pressure.
+- **#4 encryption gating** — `/queue` shows an unmissable amber
+  banner ("You haven't set up your encryption key.") with a deep
+  link to the arbiter profile when the signed-in wallet hasn't
+  configured `arbiter_keys.encryptionPubkey`.
+- **#5 verdict-as-percentage clarity** — the commit form swapped
+  the bare number input for a range slider with `All A` / `All B`
+  labels at the ends and a live `60 / 40` readout. Avoids the
+  for/against framing the spec calls out as a footgun.
+- New **YOUR STATUS** rail card surfaces the current phase
+  prominently (`Commit phase` / `Reveal phase` / `Resolved` /
+  `Awaiting panel` / `Appeal window`) with a color band, sanitized
+  for arbiters so `appeal_*` collapses to `open` / `revealing` —
+  same de novo rule as the status badge.
+
+### Anonymity tightening
+
+- Queue page drops the `Phase` column and passes `forArbiter` to the
+  status badge — assigned arbiters no longer see "Original" /
+  "Appeal" labeling or `appeal_*` status text. Matches
+  `ux-design.md`'s "queue rows are intentionally undifferentiated"
+  invariant.
+- Case workspace's `Panel` and `Appeal panel` sections are now
+  hidden from public observers while the case is in flight. Parties
+  still see them; everyone sees them post-resolution. D13 anonymity.
+- `assembleTimeline` withholds the panelist address from
+  `panelist_*` events for public observers during flight (renders as
+  `(hidden)` rather than the real address).
+- `lib/policy.readAppealFeeBps` reads the fee from `policy()` on-chain
+  instead of a hardcoded 250 bps; falls back to 250 if the RPC fails.
+
+### Cases ledger + roster — spec column parity
+
+- Ledger rows now include the disputed amount and the relative
+  opened time, per `ux-design.md:250-252`.
+- Roster rows now include the relative joined time, per
+  `ux-design.md:442`.
+
+### Hygiene
+
+- Dropped unused `clsx` dependency.
+- `import "server-only"` added to `lib/db/{client,schema}.ts`.
+- `.gitignore` covers root-level `.local-pg-data/`, `screenshots-v2/`,
+  `screenshots-v3/`.
+- `pnpm e2e` and `pnpm e2e:smoke` scripts added.
+- CI workflow (`.github/workflows/ci.yml`) runs typecheck, vitest,
+  and the hardhat suite on push + PR.
+- `docs/security-review.md` is banner-marked as superseded by
+  `docs/security-review-redesign.md` (the v0 review's specific
+  findings don't apply to the redesigned contract).
+
+## v0.4.0 — encrypted evidence files (unreleased)
+
+### Added
+- **Encryption parity for evidence.** Same X25519+AES-GCM hybrid scheme
+  used for briefs (`lib/crypto/seal.ts`) now applies to uploaded files
+  in the evidence panel. Opt-in; client-side seal before upload.
+- **Evidence storage gains `is_encrypted` + sealed-blob columns.**
+
+### Notes
+- Recipient set for an encrypted file = the case panel + the
+  uploader. Panel changes after upload don't re-seal automatically; the
+  uploader needs to re-upload to extend access.
+
 ## v0.3.0 — encrypted briefs (unreleased)
 
 ### Added

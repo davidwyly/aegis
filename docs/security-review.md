@@ -1,4 +1,12 @@
-# Aegis security review (v0.1)
+# Aegis security review (v0.1) — SUPERSEDED
+
+> ⚠️ **Stale.** This review covers the v0 1637-line `Aegis.sol`, which has
+> since been replaced by a 1488-line single-arbiter + appeal-of-3
+> redesign. The live review for the current contract is
+> [`security-review-redesign.md`](./security-review-redesign.md). The
+> trust assumptions below still apply; the specific findings (F-01..F-07)
+> have either been fixed in the redesigned contract or no longer apply to
+> the new attack surface.
 
 This is a manual pre-audit review of `blockchain/contracts/Aegis.sol` and
 `blockchain/contracts/adapters/VaultraAdapter.sol`. Slither was not run in

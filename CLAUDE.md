@@ -11,7 +11,8 @@ the threat model lives in `docs/security-review.md`.
 - Solidity 0.8.24 + Hardhat — contracts in `blockchain/`
 - Drizzle ORM + Supabase Postgres — schema in `lib/db/schema.ts`
 - SIWE + iron-session — ported from Vaultra's `lib/auth/`
-- vitest (pure logic) + Hardhat (contracts) — no Playwright in v1
+- vitest (pure logic) + Hardhat (contracts) + Playwright (integration
+  harness with embedded postgres + local hardhat node; see `e2e/`)
 
 ## Layout
 

@@ -24,9 +24,12 @@ const KIND_COLOR: Record<TimelineEvent["kind"], string> = {
   case_resolved: "bg-emerald-600",
 }
 
-function shortAddr(a: string | null) {
-  if (!a) return "system"
-  return `${a.slice(0, 6)}…${a.slice(-4)}`
+function actorLabel(ev: TimelineEvent): string {
+  if (ev.actor) return `${ev.actor.slice(0, 6)}…${ev.actor.slice(-4)}`
+  // No actor — either the system itself (case_opened, case_resolved)
+  // or the address was withheld for in-flight anonymity (panelist_*
+  // events on the public timeline).
+  return ev.kind.startsWith("panelist_") ? "(hidden)" : "system"
 }
 
 function describe(ev: TimelineEvent): string {
@@ -77,7 +80,7 @@ export function CaseTimeline({ events }: { events: TimelineEvent[] }) {
           <div className="text-sm">
             <span className="font-medium">{KIND_LABELS[ev.kind]}</span>
             {" — "}
-            <span className="font-mono text-xs">{shortAddr(ev.actor)}</span>
+            <span className="font-mono text-xs">{actorLabel(ev)}</span>
             <span className="ml-2 text-zinc-600 dark:text-zinc-400">
               {describe(ev)}
             </span>

@@ -28,3 +28,8 @@ Thumbs.db
 /e2e/report/
 /e2e/.fixtures.json
 /e2e/.pgdata/
+
+# Local-dev detritus (embedded postgres, manual screenshot baselines)
+/.local-pg-data/
+/screenshots-v2/
+/screenshots-v3/

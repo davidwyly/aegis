@@ -6,6 +6,16 @@ import { eq, inArray } from "drizzle-orm"
 // Roster changes as governance registers / revokes arbiters.
 export const dynamic = "force-dynamic"
 
+function joinedAgo(d: Date | string, now: number): string {
+  const ms = now - new Date(d).getTime()
+  const totalHr = Math.floor(ms / 3_600_000)
+  if (totalHr < 1) return "just now"
+  if (totalHr < 24) return `${totalHr}h ago`
+  const totalDay = Math.floor(totalHr / 24)
+  if (totalDay < 30) return `${totalDay}d ago`
+  return new Date(d).toLocaleDateString()
+}
+
 export default async function ArbitersPage({
   searchParams,
 }: {
@@ -38,6 +48,7 @@ export default async function ArbitersPage({
   const visible = encryptedOnly
     ? rows.filter((a) => keyAddresses.has(a.address))
     : rows
+  const renderNow = Date.now()
 
   return (
     <div className="space-y-4">
@@ -120,6 +131,7 @@ export default async function ArbitersPage({
               <div className="text-right text-xs text-zinc-500">
                 <div>{a.caseCount} cases</div>
                 <div>stake: {a.stakedAmount}</div>
+                <div>joined {joinedAgo(a.registeredAt, renderNow)}</div>
                 <a
                   href={getExplorerAddressUrl(a.chainId, a.address)}
                   className="hover:underline"
