@@ -356,6 +356,11 @@ export const evidenceFiles = pgTable(
     uploaderAddress: text("uploader_address").notNull(),
     role: text("role").notNull(), // 'partyA' | 'partyB'
     fileName: text("file_name").notNull(),
+    // Free-form group/folder label chosen by the uploader so multi-file
+    // submissions can be organised (e.g. "documents", "media", "exhibits").
+    // Null/empty renders as "uncategorised" in the UI and lands at the
+    // ZIP root. UI offers a few suggestions; server doesn't constrain.
+    groupName: text("group_name"),
     mimeType: text("mime_type").notNull(),
     size: integer("size").notNull(),
     // sha256 of whatever is stored in `content` — i.e. the plaintext

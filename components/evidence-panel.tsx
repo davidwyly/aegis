@@ -14,6 +14,7 @@ interface EvidenceItem {
   uploaderAddress: string
   role: "partyA" | "partyB"
   fileName: string
+  groupName: string | null
   mimeType: string
   size: number
   sha256: string
@@ -22,6 +23,9 @@ interface EvidenceItem {
   bodyNonce: string | null
   sealedRecipients: SealedKey[] | null
 }
+
+const GROUP_SUGGESTIONS = ["documents", "media", "exhibits", "other"]
+const UNCATEGORISED_LABEL = "uncategorised"
 
 const MAX_BYTES = 2 * 1024 * 1024
 const ERROR_LABELS: Record<string, string> = {
@@ -79,6 +83,7 @@ export function EvidencePanel({
   const [uploading, setUploading] = useState(false)
   const [encryptOn, setEncryptOn] = useState(false)
   const [recipientKeys, setRecipientKeys] = useState<{ address: string; pubkey: string }[] | null>(null)
+  const [pendingGroup, setPendingGroup] = useState<string>("")
   const inputRef = useRef<HTMLInputElement>(null)
 
   const recipientAddresses = useMemo(() => {
@@ -135,6 +140,7 @@ export function EvidencePanel({
     setError(null)
     try {
       const form = new FormData()
+      if (pendingGroup.trim()) form.append("groupName", pendingGroup.trim())
       if (encryptOn) {
         if (!recipientKeys) throw new Error("Recipient keys not loaded yet")
         if (missingRecipients.length > 0) {
@@ -207,6 +213,23 @@ export function EvidencePanel({
       {canUpload && (
         <div className="space-y-2">
           <div className="flex flex-wrap items-center gap-2">
+            <label className="flex items-center gap-1 text-xs text-zinc-500">
+              <span>Folder</span>
+              <input
+                list="aegis-evidence-groups"
+                value={pendingGroup}
+                onChange={(e) => setPendingGroup(e.target.value)}
+                placeholder={UNCATEGORISED_LABEL}
+                className="input text-xs"
+                style={{ width: "10rem" }}
+                disabled={uploading}
+              />
+            </label>
+            <datalist id="aegis-evidence-groups">
+              {GROUP_SUGGESTIONS.map((g) => (
+                <option key={g} value={g} />
+              ))}
+            </datalist>
             <input
               ref={inputRef}
               type="file"
@@ -252,46 +275,75 @@ export function EvidencePanel({
       ) : items.length === 0 ? (
         <div className="text-sm text-zinc-500">No evidence uploaded yet.</div>
       ) : (
-        <ul className="space-y-1">
-          {items.map((it) => (
-            <li
-              key={it.id}
-              className="flex flex-wrap items-center gap-3 rounded border border-zinc-200 p-2 dark:border-zinc-800"
-            >
-              {it.isEncrypted ? (
-                <button
-                  onClick={() => void downloadAndDecrypt(it)}
-                  className="font-mono text-sm hover:underline"
-                  title="Decrypt and download"
-                >
-                  🔒 {it.fileName}
-                </button>
-              ) : (
-                <a
-                  href={`/api/cases/${caseId}/evidence/${it.id}`}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="font-mono text-sm hover:underline"
-                >
-                  {it.fileName}
-                </a>
-              )}
-              <span className="text-xs text-zinc-500">
-                {it.mimeType} · {formatSize(it.size)}
-              </span>
-              <span className="text-xs text-zinc-500">
-                {it.role} · {shortAddr(it.uploaderAddress)}
-              </span>
-              <span
-                className="text-[10px] font-mono text-zinc-400"
-                title={`sha256: ${it.sha256}`}
-              >
-                {it.sha256.slice(0, 10)}…
-              </span>
-            </li>
+        <div className="space-y-3">
+          {groupItems(items).map(({ group, files }) => (
+            <div key={group ?? "__none__"}>
+              <div className="flex items-baseline justify-between border-b border-zinc-200 pb-1 dark:border-zinc-800">
+                <span className="text-xs font-medium uppercase tracking-wider text-zinc-500">
+                  {group ?? UNCATEGORISED_LABEL}
+                </span>
+                <span className="text-[10px] text-zinc-400">
+                  {files.length} file{files.length === 1 ? "" : "s"}
+                </span>
+              </div>
+              <ul className="mt-1 space-y-1">
+                {files.map((it) => (
+                  <li
+                    key={it.id}
+                    className="flex flex-wrap items-center gap-3 rounded border border-zinc-200 p-2 dark:border-zinc-800"
+                  >
+                    {it.isEncrypted ? (
+                      <button
+                        onClick={() => void downloadAndDecrypt(it)}
+                        className="font-mono text-sm hover:underline"
+                        title="Decrypt and download"
+                      >
+                        🔒 {it.fileName}
+                      </button>
+                    ) : (
+                      <a
+                        href={`/api/cases/${caseId}/evidence/${it.id}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="font-mono text-sm hover:underline"
+                      >
+                        {it.fileName}
+                      </a>
+                    )}
+                    <span className="text-xs text-zinc-500">
+                      {it.mimeType} · {formatSize(it.size)}
+                    </span>
+                    <span className="text-xs text-zinc-500">
+                      {it.role} · {shortAddr(it.uploaderAddress)}
+                    </span>
+                    <span
+                      className="text-[10px] font-mono text-zinc-400"
+                      title={`sha256: ${it.sha256}`}
+                    >
+                      {it.sha256.slice(0, 10)}…
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
           ))}
-        </ul>
+        </div>
       )}
     </div>
   )
+}
+
+function groupItems(items: EvidenceItem[]): { group: string | null; files: EvidenceItem[] }[] {
+  const map = new Map<string | null, EvidenceItem[]>()
+  for (const it of items) {
+    const key = it.groupName?.trim() || null
+    const bucket = map.get(key)
+    if (bucket) bucket.push(it)
+    else map.set(key, [it])
+  }
+  const named = [...map.entries()]
+    .filter(([k]) => k !== null)
+    .sort(([a], [b]) => (a as string).localeCompare(b as string))
+  const uncategorised = map.has(null) ? [[null, map.get(null)!] as const] : []
+  return [...named, ...uncategorised].map(([group, files]) => ({ group, files }))
 }

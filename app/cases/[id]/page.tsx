@@ -405,9 +405,17 @@ export default async function CaseDetailPage({
         c.status === "resolved" ||
         c.status === "default_resolved") && (
         <section className="card">
-          <h2 className="text-sm font-medium uppercase tracking-wide text-zinc-500">
-            Evidence
-          </h2>
+          <div className="flex items-baseline justify-between gap-3">
+            <h2 className="text-sm font-medium uppercase tracking-wide text-zinc-500">
+              Evidence
+            </h2>
+            <a
+              href={`/api/cases/${c.id}/evidence/zip`}
+              className="btn-secondary text-xs"
+            >
+              Download all (ZIP)
+            </a>
+          </div>
           <p className="mt-1 text-xs text-zinc-500">
             Visibility tracks the brief: parties see their own uploads,
             panelists see all once assigned, the opposing party sees
@@ -426,9 +434,19 @@ export default async function CaseDetailPage({
 
       {(isPanelist || c.status === "resolved" || c.status === "default_resolved") && (
         <section className="card">
-          <h2 className="text-sm font-medium uppercase tracking-wide text-zinc-500">
-            Briefs
-          </h2>
+          <div className="flex items-baseline justify-between gap-3">
+            <h2 className="text-sm font-medium uppercase tracking-wide text-zinc-500">
+              Briefs
+            </h2>
+            {briefs.length > 0 && (
+              <a
+                href={`/api/cases/${c.id}/briefs/zip`}
+                className="btn-secondary text-xs"
+              >
+                Download all (ZIP)
+              </a>
+            )}
+          </div>
           {briefs.length === 0 ? (
             <p className="mt-1 text-sm text-zinc-500">No briefs submitted yet.</p>
           ) : (

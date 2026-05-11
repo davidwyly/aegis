@@ -27,6 +27,8 @@ export interface UploadEvidenceInput {
   uploaderAddress: `0x${string}`
   fileName: string
   mimeType: string
+  /** Optional folder/group label so the UI and ZIP bundle can nest by topic. */
+  groupName?: string | null
   /** Body bytes — plaintext when not encrypted, AES-GCM ciphertext when encrypted. */
   content: Buffer
   /** Encryption metadata. Both fields required if either is present. */
@@ -40,6 +42,7 @@ export interface EvidenceListItem {
   uploaderAddress: string
   role: "partyA" | "partyB"
   fileName: string
+  groupName: string | null
   mimeType: string
   size: number
   sha256: string
@@ -66,6 +69,12 @@ export class EvidenceError extends Error {
 const trimFilename = (name: string) =>
   name.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 200)
 
+const trimGroupName = (name: string | null | undefined): string | null => {
+  if (!name) return null
+  const cleaned = name.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 64)
+  return cleaned.length === 0 ? null : cleaned
+}
+
 export async function uploadEvidence(
   input: UploadEvidenceInput,
 ): Promise<EvidenceListItem> {
@@ -78,6 +87,7 @@ export async function uploadEvidence(
   }
   const fileName = trimFilename(input.fileName)
   if (!fileName) throw new EvidenceError("FILENAME_REQUIRED")
+  const groupName = trimGroupName(input.groupName)
 
   const caseRow = await db.query.cases.findFirst({
     where: eq(schema.cases.id, input.caseUuid),
@@ -105,6 +115,7 @@ export async function uploadEvidence(
       uploaderAddress: uploader,
       role,
       fileName,
+      groupName,
       mimeType: input.mimeType,
       size: input.content.length,
       sha256,
@@ -124,6 +135,7 @@ export async function uploadEvidence(
     uploaderAddress: uploader,
     role,
     fileName,
+    groupName,
     mimeType: input.mimeType,
     size: input.content.length,
     sha256,
@@ -157,6 +169,7 @@ export async function listEvidenceForViewer(
       uploaderAddress: schema.evidenceFiles.uploaderAddress,
       role: schema.evidenceFiles.role,
       fileName: schema.evidenceFiles.fileName,
+      groupName: schema.evidenceFiles.groupName,
       mimeType: schema.evidenceFiles.mimeType,
       size: schema.evidenceFiles.size,
       sha256: schema.evidenceFiles.sha256,
@@ -218,5 +231,34 @@ export async function downloadEvidence(
   }
 }
 
-void inArray // reserved for future bulk fetches
 void and
+
+export interface EvidenceWithContent extends EvidenceListItem {
+  content: Buffer
+}
+
+/**
+ * Bulk fetch for the ZIP-bundle endpoint. Visibility gating runs through
+ * listEvidenceForViewer; we then pull the content bytes in a single query
+ * keyed by the visible ids.
+ */
+export async function listEvidenceWithContentForViewer(
+  caseUuid: string,
+  viewer: `0x${string}` | null,
+): Promise<EvidenceWithContent[]> {
+  const summaries = await listEvidenceForViewer(caseUuid, viewer)
+  if (summaries.length === 0) return []
+  const ids = summaries.map((s) => s.id)
+  const rows = await db
+    .select({
+      id: schema.evidenceFiles.id,
+      content: schema.evidenceFiles.content,
+    })
+    .from(schema.evidenceFiles)
+    .where(inArray(schema.evidenceFiles.id, ids))
+  const byId = new Map(rows.map((r) => [r.id, r.content]))
+  return summaries.flatMap((s) => {
+    const content = byId.get(s.id)
+    return content ? [{ ...s, content }] : []
+  })
+}
