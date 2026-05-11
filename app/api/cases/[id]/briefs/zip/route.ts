@@ -24,11 +24,23 @@ export async function GET(
   }
 
   const zip = new JSZip()
+  const used = new Set<string>()
   const manifest = briefs.map((b) => {
-    const short = `${b.authorAddress.slice(2, 8)}`
-    const fileName = b.isEncrypted
-      ? `${b.role}-${short}.sealed.json`
-      : `${b.role}-${short}.txt`
+    // 10 hex chars of the address makes accidental cross-author
+    // collisions vanishingly unlikely; `used` is the belt-and-braces
+    // guarantee (schema already constrains one brief per author per
+    // case, so this only triggers under tampering).
+    const baseShort = b.authorAddress.slice(2, 12)
+    const ext = b.isEncrypted ? "sealed.json" : "txt"
+    let fileName = `${b.role}-${baseShort}.${ext}`
+    if (used.has(fileName)) {
+      let prefixLen = 14
+      do {
+        fileName = `${b.role}-${b.authorAddress.slice(2, prefixLen)}.${ext}`
+        prefixLen += 4
+      } while (used.has(fileName) && prefixLen <= b.authorAddress.length)
+    }
+    used.add(fileName)
     if (b.isEncrypted) {
       zip.file(fileName, JSON.stringify(b.sealed, null, 2))
     } else {

@@ -69,12 +69,28 @@ export class EvidenceError extends Error {
 const trimFilename = (name: string) =>
   name.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 200)
 
+// Sanitise an uploader-supplied folder label. Allowed character set is
+// filename-safe ASCII; we deliberately reject:
+//   - the literal ".", ".."   — these as ZIP directory names create
+//     entries like `../foo` that escape the extraction root (zip slip)
+//   - any name *containing* ".." — same risk if the consumer's
+//     extractor doesn't normalise path segments
+//   - leading dots — produce hidden directories that some extractors
+//     treat specially
+// On rejection we collapse to null (uncategorised) rather than erroring,
+// since the upload itself is valid; only the requested folder label is
+// dropped.
 const trimGroupName = (name: string | null | undefined): string | null => {
   if (!name) return null
   const trimmed = name.trim()
   if (trimmed.length === 0) return null
-  const cleaned = trimmed.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 64)
-  return cleaned.length === 0 ? null : cleaned
+  const cleaned = trimmed
+    .replace(/[^A-Za-z0-9._-]/g, "_")
+    .replace(/^\.+/, "")
+    .slice(0, 64)
+  if (cleaned.length === 0) return null
+  if (cleaned === "." || cleaned === ".." || cleaned.includes("..")) return null
+  return cleaned
 }
 
 export async function uploadEvidence(

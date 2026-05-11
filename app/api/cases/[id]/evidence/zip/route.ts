@@ -26,8 +26,19 @@ export async function GET(
 
   const zip = new JSZip()
   const used = new Set<string>()
+  // Defense-in-depth — the upload-time sanitiser already strips path-
+  // traversal payloads from groupName, but re-validate here so a stale
+  // row from before the sanitiser tightened (or a hand-crafted DB
+  // insert) can't smuggle "../" into a ZIP entry name.
+  const safeFolder = (raw: string | null): string => {
+    const t = raw?.trim() ?? ""
+    if (!t || t === "." || t === ".." || t.includes("..") || /[\\/]/.test(t)) {
+      return "uncategorised"
+    }
+    return t
+  }
   const manifest = items.map((it) => {
-    const folder = it.groupName?.trim() || "uncategorised"
+    const folder = safeFolder(it.groupName)
     // De-dupe colliding filenames within the same folder. First try the
     // raw filename, then prepend a growing slice of the row's UUID until
     // unique — handles the pathological case where another uploader's
