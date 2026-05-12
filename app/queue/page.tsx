@@ -105,19 +105,16 @@ export default async function QueuePage() {
             </thead>
             <tbody>
               {items.map((it) => {
-                const needsCommit =
-                  (it.phase === "original" && it.status === "open" && !it.committedAt) ||
-                  (it.phase === "appeal" && it.status === "appeal_open" && !it.committedAt)
+                // Status is already sanitized server-side by
+                // listQueueFor, so we only ever see base values here.
+                const needsCommit = it.status === "open" && !it.committedAt
                 const needsReveal =
-                  ((it.phase === "original" &&
-                    (it.status === "open" || it.status === "revealing")) ||
-                    (it.phase === "appeal" &&
-                      (it.status === "appeal_open" || it.status === "appeal_revealing"))) &&
+                  (it.status === "open" || it.status === "revealing") &&
                   it.committedAt &&
                   !it.revealedAt
                 return (
                   <tr
-                    key={`${it.caseUuid}-${it.phase}`}
+                    key={it.caseUuid}
                     className="border-t border-zinc-200 dark:border-zinc-800"
                   >
                     <td className="py-2 pr-4">

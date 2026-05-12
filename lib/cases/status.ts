@@ -36,3 +36,21 @@ export type ResolvedCaseStatus = (typeof RESOLVED_CASE_STATUSES)[number]
 export function isResolvedCaseStatus(s: string): s is ResolvedCaseStatus {
   return (RESOLVED_CASE_STATUSES as readonly string[]).includes(s)
 }
+
+// De novo blindness: an assigned arbiter must not be able to tell
+// whether the case they're sitting on is in the original or appeal
+// phase. The contract emits phase-agnostic events; the off-chain
+// status enum still carries the distinction (DB migration TBD), so
+// any surface that flows status to an arbiter MUST collapse the
+// appeal_* values to their base equivalents first.
+const APPEAL_STATUS_MAP = {
+  appeal_awaiting_panel: "awaiting_panel",
+  appeal_open: "open",
+  appeal_revealing: "revealing",
+} as const satisfies Partial<Record<CaseStatus, CaseStatus>>
+
+export function sanitizeStatusForArbiter(status: CaseStatus): CaseStatus {
+  return (
+    (APPEAL_STATUS_MAP as Record<string, CaseStatus>)[status] ?? status
+  )
+}

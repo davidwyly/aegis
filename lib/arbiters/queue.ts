@@ -1,13 +1,20 @@
 import "server-only"
 import { eq, and, isNull, inArray, desc } from "drizzle-orm"
 import { db, schema } from "@/lib/db/client"
+import {
+  CASE_STATUSES,
+  sanitizeStatusForArbiter,
+  type CaseStatus,
+} from "@/lib/cases/status"
 
+// De novo blindness: the queue is arbiter-facing by definition, so
+// the response shape never carries `phase`, and `status` is always
+// sanitized to base values (no appeal_* leakage).
 export interface QueueItem {
   caseUuid: string
   caseId: string
   chainId: number
-  status: string
-  phase: "original" | "appeal"
+  status: CaseStatus
   seat: number
   deadlineCommit: Date | null
   deadlineReveal: Date | null
@@ -19,29 +26,20 @@ export interface QueueItem {
 
 const lower = (a: string) => a.toLowerCase()
 
-type ActiveStatus =
-  | "awaiting_panel"
-  | "open"
-  | "revealing"
-  | "appealable_resolved"
-  | "appeal_awaiting_panel"
-  | "appeal_open"
-  | "appeal_revealing"
-
-const ACTIVE_STATUSES: ActiveStatus[] = [
-  "awaiting_panel",
-  "open",
-  "revealing",
-  "appealable_resolved",
-  "appeal_awaiting_panel",
-  "appeal_open",
-  "appeal_revealing",
-]
+// Statuses where an arbiter row might still be live — i.e., where it
+// belongs in the queue. We filter on raw statuses in SQL, then
+// sanitize on the way out.
+const ACTIVE_STATUSES: CaseStatus[] = CASE_STATUSES.filter(
+  (s) => s !== "resolved" && s !== "default_resolved" && s !== "stalled",
+)
 
 /**
- * Cases the given address is currently sitting on as a panelist —
- * either the original or the appeal phase. Excludes recused/redrawn
- * rows and cases that have already terminally resolved.
+ * Cases the given address is currently sitting on as a panelist.
+ * Excludes recused/redrawn rows and terminally-resolved cases.
+ *
+ * Status values are collapsed via `sanitizeStatusForArbiter` so the
+ * caller cannot infer whether they're on the original or the appeal
+ * phase. The internal `phase` column is intentionally NOT projected.
  */
 export async function listQueueFor(address: string): Promise<QueueItem[]> {
   const addr = lower(address)
@@ -49,7 +47,6 @@ export async function listQueueFor(address: string): Promise<QueueItem[]> {
     .select({
       caseUuid: schema.panelMembers.caseUuid,
       seat: schema.panelMembers.seat,
-      phase: schema.panelMembers.phase,
       committedAt: schema.panelMembers.committedAt,
       revealedAt: schema.panelMembers.revealedAt,
       caseId: schema.cases.caseId,
@@ -75,8 +72,7 @@ export async function listQueueFor(address: string): Promise<QueueItem[]> {
     caseUuid: r.caseUuid,
     caseId: r.caseId,
     chainId: r.chainId,
-    status: r.status,
-    phase: (r.phase as "original" | "appeal") ?? "original",
+    status: sanitizeStatusForArbiter(r.status as CaseStatus),
     seat: r.seat,
     deadlineCommit: r.deadlineCommit ?? null,
     deadlineReveal: r.deadlineReveal ?? null,
