@@ -160,6 +160,13 @@ contract VaultraAdapter is IArbitrableEscrow {
         // VRF request gets burned and the Aegis case sits stuck.
         if (noMilestone) {
             if (hasMilestones) revert MilestoneShapeMismatch();
+            // resolveDisputeNoMilestone ignores milestoneIndex, but it
+            // is still hashed into the caseId. Without this check
+            // anyone could register a parallel Aegis case per index for
+            // the same underlying dispute — each one burns a VRF draw
+            // and the trailing cases stick at finalize time once the
+            // first resolves the escrow. Canonical form is 0.
+            if (milestoneIndex != 0) revert InvalidMilestoneIndex();
         } else {
             if (!hasMilestones) revert MilestoneShapeMismatch();
             if (milestoneIndex >= milestonesCount) revert InvalidMilestoneIndex();

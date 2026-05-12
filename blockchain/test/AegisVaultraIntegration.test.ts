@@ -248,4 +248,23 @@ describe("Aegis ↔ VaultraEscrow integration", () => {
       adapter.connect(client).registerCase(escrowId, 0n, false)
     ).to.be.revertedWithCustomError(adapter, "MilestoneShapeMismatch")
   })
+
+  it("registerCase rejects non-zero milestoneIndex on noMilestone=true", async () => {
+    const ctx = await loadFixture(fixture)
+    const { adapter, vaultra, usdcToken, client, worker } = ctx
+
+    const escrowId = await createAndFundEscrow(vaultra, usdcToken, client, worker, usdc("100"))
+    await vaultra.connect(worker).raiseDisputeNoMilestone(escrowId)
+
+    // Without this guard, anyone could spawn parallel Aegis cases by
+    // varying milestoneIndex (it hashes into the caseId but is ignored
+    // by resolveDisputeNoMilestone). Only milestoneIndex == 0 is the
+    // canonical form on the no-milestone path.
+    await expect(
+      adapter.connect(client).registerCase(escrowId, 1n, true)
+    ).to.be.revertedWithCustomError(adapter, "InvalidMilestoneIndex")
+
+    // The canonical form still succeeds.
+    await adapter.connect(client).registerCase(escrowId, 0n, true)
+  })
 })
