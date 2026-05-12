@@ -278,7 +278,7 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
         uint256 stakeRequirement,
         uint16 appealFeeBps,
         uint16 perArbiterFeeBps,
-        address treasury
+        address indexed treasury
     );
     event NewCasesPaused(bool paused);
     event CaseRequested(
@@ -671,7 +671,7 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
 
         // Fail fast: if the eligible pool can't seat one arbiter, don't
         // pay VRF gas for a request that fulfillRandomWords would revert on.
-        address[] memory noExclude;
+        address[] memory noExclude = new address[](0);
         if (_eligibleArbiterCount(partyA, partyB, noExclude) == 0) {
             revert NotEnoughArbiters();
         }
@@ -769,7 +769,7 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
     /// and stall-redraw (round 1, future). On a redraw, the prior
     /// arbiter is excluded from the eligible pool.
     function _drawOriginal(Case storage c, bytes32 caseId, uint256 seed) internal {
-        address[] memory exclude;
+        address[] memory exclude = new address[](0);
         if (c.originalArbiter != address(0)) {
             exclude = new address[](1);
             exclude[0] = c.originalArbiter;
@@ -1072,7 +1072,6 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
 
         // Pot to distribute = escrow fee + appellant's held appeal fee.
         uint256 totalPot = received + c.appealFeeAmount;
-        uint256 perArbiterTarget = (c.amount * p.perArbiterFeeBps) / BPS_DENOMINATOR;
 
         // M-01 fix: pre-compute how many arbiters get paid, then split
         // either at the policy target rate (if the pot can satisfy
@@ -1083,9 +1082,14 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
         if (aRevealed) ++payableCount;
         if (bRevealed) ++payableCount;
 
+        // Cap check is multiplied-out to avoid divide-before-multiply
+        // rounding (Slither). The unrounded target per arbiter is
+        // c.amount * perArbiterFeeBps / BPS_DENOMINATOR; the share
+        // assigned to claimable still uses the rounded value so that
+        // totalPayout never exceeds totalPot.
         uint256 perArbiterShare;
-        if (perArbiterTarget * payableCount <= totalPot) {
-            perArbiterShare = perArbiterTarget;
+        if (c.amount * p.perArbiterFeeBps * payableCount <= totalPot * BPS_DENOMINATOR) {
+            perArbiterShare = (c.amount * p.perArbiterFeeBps) / BPS_DENOMINATOR;
         } else {
             // Pot too small for the policy target — split equally among
             // payable arbiters. Everyone gets the same reduced share;
