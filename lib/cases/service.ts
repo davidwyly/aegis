@@ -2,10 +2,10 @@ import "server-only"
 import { eq, and, desc, lt, or, sql, inArray } from "drizzle-orm"
 import { db, schema } from "@/lib/db/client"
 import {
-  isResolvedCaseStatus,
   type CaseStatus,
   type ResolvedCaseStatus,
 } from "@/lib/db/schema"
+import { resolveViewerVisibility } from "@/lib/cases/visibility"
 import { z } from "zod"
 
 export interface OnchainCaseRequestedSnapshot {
@@ -505,41 +505,24 @@ export async function getMyBrief(caseUuid: string, address: `0x${string}`) {
 }
 
 /**
- * Visibility rule for briefs:
- *   - the author can always see their own
- *   - panelists can read both briefs once the case exists
- *   - opposing party cannot read until the case is resolved
- *   - public ledger never includes briefs
+ * Visibility for briefs — see `resolveViewerVisibility` for the
+ * shared rule. The public ledger never includes briefs; this is the
+ * authenticated read path.
  */
 export async function listBriefsForViewer(
   caseUuid: string,
   viewer: `0x${string}` | null,
 ) {
+  const visibility = await resolveViewerVisibility(caseUuid, viewer)
+  if (visibility === "none") return []
   const all = await db.query.briefs.findMany({
     where: eq(schema.briefs.caseUuid, caseUuid),
   })
-  if (!viewer) return []
-  const v = viewer.toLowerCase()
-
-  const caseRow = await db.query.cases.findFirst({
-    where: eq(schema.cases.id, caseUuid),
-  })
-  if (!caseRow) return []
-  const isParty =
-    v === caseRow.partyA.toLowerCase() || v === caseRow.partyB.toLowerCase()
-  const isResolved = isResolvedCaseStatus(caseRow.status)
-
-  if (isParty && !isResolved) {
-    return all.filter((b) => b.authorAddress.toLowerCase() === v)
-  }
-
-  // Panelists or post-resolution party: see all.
-  const isPanelist = await db.query.panelMembers.findFirst({
-    where: (p, { eq, and }) =>
-      and(eq(p.caseUuid, caseUuid), eq(p.panelistAddress, v)),
-  })
-  if (isPanelist || isResolved) return all
-  return []
+  if (visibility === "all") return all
+  // visibility === "own": viewer is non-null and a party (guaranteed
+  // by the helper); filter to their own contributions.
+  const v = viewer!.toLowerCase()
+  return all.filter((b) => b.authorAddress.toLowerCase() === v)
 }
 
 export class BriefError extends Error {
