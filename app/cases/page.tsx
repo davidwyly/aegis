@@ -2,24 +2,28 @@ import Link from "next/link"
 import { listLedger, type ListLedgerInput } from "@/lib/cases/service"
 import { CaseStatusBadge } from "@/components/case-status-badge"
 import { getExplorerAddressUrl } from "@/lib/chains"
+import { getSession } from "@/lib/auth/session"
+import {
+  CASE_STATUSES,
+  isArbiterSafeCaseStatus,
+  isResolvedCaseStatus,
+  rawStatusesMatchingSanitized,
+  sanitizeStatusForArbiter,
+  type ArbiterSafeCaseStatus,
+  type CaseStatus,
+} from "@/lib/cases/status"
 
 // Server-render per request — the DB row set changes as the keeper indexes
 // new cases; static prerender would serve stale data forever.
 export const dynamic = "force-dynamic"
 
-const VALID_STATUSES = [
-  "awaiting_panel",
-  "open",
-  "revealing",
-  "appealable_resolved",
-  "appeal_awaiting_panel",
-  "appeal_open",
-  "appeal_revealing",
-  "resolved",
-  "default_resolved",
-  "stalled",
-] as const
-type Status = (typeof VALID_STATUSES)[number]
+// De novo: the filter UI shows ONLY the arbiter-safe vocabulary,
+// and `?status=appeal_*` in the URL is rejected. Anything that
+// would let a casual viewer learn whether a specific case is in
+// appeal is suppressed here too.
+const FILTERABLE_STATUSES: readonly ArbiterSafeCaseStatus[] = CASE_STATUSES.filter(
+  isArbiterSafeCaseStatus,
+)
 
 function shortAddr(a: string) {
   return `${a.slice(0, 6)}…${a.slice(-4)}`
@@ -46,15 +50,25 @@ export default async function CasesLedgerPage({
 }) {
   const sp = await searchParams
   const statusInput = Array.isArray(sp.status) ? sp.status : sp.status ? [sp.status] : []
-  const status = statusInput.filter((s): s is Status =>
-    (VALID_STATUSES as readonly string[]).includes(s),
+  // Drop anything that isn't an arbiter-safe value (silently — this
+  // is the rendered page, not the API; bad input from a URL-mangling
+  // user shouldn't error the page out).
+  const status: ArbiterSafeCaseStatus[] = statusInput.filter(
+    isArbiterSafeCaseStatus,
   )
   const chainId = sp.chain ? Number(sp.chain) : undefined
   const cursor = sp.cursor ?? null
 
+  // Expand sanitized filters to the raw values the DB column holds —
+  // `open` matches both `open` and `appeal_open`, etc.
+  const rawStatuses: CaseStatus[] =
+    status.length > 0
+      ? Array.from(new Set(status.flatMap(rawStatusesMatchingSanitized)))
+      : []
+
   const filterInput: ListLedgerInput = {
     chainId: chainId && Number.isFinite(chainId) ? chainId : undefined,
-    status: status.length > 0 ? status : undefined,
+    status: rawStatuses.length > 0 ? rawStatuses : undefined,
     cursor,
   }
 
@@ -68,6 +82,14 @@ export default async function CasesLedgerPage({
   } catch (err) {
     dbError = err instanceof Error ? err.message : String(err)
   }
+
+  // Per-row sanitization: parties on the case see the raw status
+  // (they need to know what phase they're in); resolved cases pass
+  // through as a public record. Everyone else — including an
+  // assigned arbiter who navigates here instead of /queue — gets
+  // the sanitized badge.
+  const session = await getSession()
+  const viewerLower = session.address?.toLowerCase() ?? null
 
   // Build the next-page URL preserving filters.
   const renderNow = Date.now()
@@ -95,7 +117,7 @@ export default async function CasesLedgerPage({
         <fieldset>
           <legend className="block text-xs text-zinc-500">Status</legend>
           <div className="mt-1 flex flex-wrap gap-2">
-            {VALID_STATUSES.map((s) => (
+            {FILTERABLE_STATUSES.map((s) => (
               <label key={s} className="inline-flex items-center gap-1">
                 <input
                   type="checkbox"
@@ -146,44 +168,54 @@ export default async function CasesLedgerPage({
       )}
 
       <ul className="space-y-2">
-        {rows.map((c) => (
-          <li key={c.id}>
-            <Link href={`/cases/${c.id}`} className="card flex items-center gap-4 hover:border-zinc-400">
-              <CaseStatusBadge status={c.status} />
-              <div className="grow">
-                <div className="font-mono text-xs text-zinc-500">
-                  {c.caseId.slice(0, 14)}…
+        {rows.map((c) => {
+          const isParty =
+            viewerLower !== null &&
+            (viewerLower === c.partyA.toLowerCase() ||
+              viewerLower === c.partyB.toLowerCase())
+          const showRaw = isParty || isResolvedCaseStatus(c.status)
+          const displayStatus = showRaw
+            ? c.status
+            : sanitizeStatusForArbiter(c.status)
+          return (
+            <li key={c.id}>
+              <Link href={`/cases/${c.id}`} className="card flex items-center gap-4 hover:border-zinc-400">
+                <CaseStatusBadge status={displayStatus} />
+                <div className="grow">
+                  <div className="font-mono text-xs text-zinc-500">
+                    {c.caseId.slice(0, 14)}…
+                  </div>
+                  <div className="text-sm">
+                    <span className="font-mono">{shortAddr(c.partyA)}</span>{" "}
+                    vs{" "}
+                    <span className="font-mono">{shortAddr(c.partyB)}</span>
+                    {" · "}
+                    <a
+                      href={getExplorerAddressUrl(c.chainId, c.escrowAddress)}
+                      className="hover:underline"
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      escrow {shortAddr(c.escrowAddress)}
+                    </a>
+                  </div>
                 </div>
-                <div className="text-sm">
-                  <span className="font-mono">{shortAddr(c.partyA)}</span>{" "}
-                  vs{" "}
-                  <span className="font-mono">{shortAddr(c.partyB)}</span>
-                  {" · "}
-                  <a
-                    href={getExplorerAddressUrl(c.chainId, c.escrowAddress)}
-                    className="hover:underline"
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    escrow {shortAddr(c.escrowAddress)}
-                  </a>
+                <div className="text-right text-xs text-zinc-500">
+                  <div className="font-mono text-sm text-zinc-700 dark:text-zinc-300">
+                    {c.amount}
+                  </div>
+                  <div>{relativeTime(c.openedAt, renderNow)}</div>
+                  <div>
+                    r{c.round} · panel {c.panelSize}
+                  </div>
+                  {c.medianPercentage !== null && (
+                    <div>verdict {c.medianPercentage}/100</div>
+                  )}
                 </div>
-              </div>
-              <div className="text-right text-xs text-zinc-500">
-                <div className="font-mono text-sm text-zinc-700 dark:text-zinc-300">
-                  {c.amount}
-                </div>
-                <div>{relativeTime(c.openedAt, renderNow)}</div>
-                <div>
-                  r{c.round} · panel {c.panelSize}
-                </div>
-                {c.medianPercentage !== null && (
-                  <div>verdict {c.medianPercentage}/100</div>
-                )}
-              </div>
-            </Link>
-          </li>
-        ))}
+              </Link>
+            </li>
+          )
+        })}
       </ul>
 
       {nextCursor && (
