@@ -671,7 +671,10 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
 
         // Fail fast: if the eligible pool can't seat one arbiter, don't
         // pay VRF gas for a request that fulfillRandomWords would revert on.
-        address[] memory noExclude = new address[](0);
+        // Uninitialized memory array is a length-0 array in Solidity; no
+        // allocation needed.
+        // slither-disable-next-line uninitialized-local
+        address[] memory noExclude;
         if (_eligibleArbiterCount(partyA, partyB, noExclude) == 0) {
             revert NotEnoughArbiters();
         }
@@ -769,7 +772,10 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
     /// and stall-redraw (round 1, future). On a redraw, the prior
     /// arbiter is excluded from the eligible pool.
     function _drawOriginal(Case storage c, bytes32 caseId, uint256 seed) internal {
-        address[] memory exclude = new address[](0);
+        // Uninitialized memory array is length-0; only allocate when we
+        // actually need to push an exclusion (the redraw path).
+        // slither-disable-next-line uninitialized-local
+        address[] memory exclude;
         if (c.originalArbiter != address(0)) {
             exclude = new address[](1);
             exclude[0] = c.originalArbiter;
@@ -1098,7 +1104,6 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
             ? 0
             : (numerator - 1) / BPS_DENOMINATOR + 1;
         uint256 perArbiterShare;
-        // slither-disable-next-line divide-before-multiply
         if (perArbiterCeil * payableCount <= totalPot) {
             perArbiterShare = numerator / BPS_DENOMINATOR;
         } else {
