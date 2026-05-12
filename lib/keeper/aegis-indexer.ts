@@ -2,13 +2,14 @@ import {
   createPublicClient,
   http,
   parseAbiItem,
+  zeroAddress,
   type Address,
   type Hex,
 } from "viem"
-import { base, baseSepolia, hardhat } from "viem/chains"
 import { eq, and, sql } from "drizzle-orm"
 
 import { db, schema } from "@/lib/db/client"
+import { viemChainFor } from "@/lib/chains"
 import { aegisAbi } from "@/lib/abi/aegis"
 import {
   recordCaseOpened,
@@ -22,13 +23,6 @@ interface IndexerConfig {
   chainId: number
   rpcUrl: string
   aegisAddress: Address
-}
-
-function chainFor(chainId: number) {
-  if (chainId === base.id) return base
-  if (chainId === baseSepolia.id) return baseSepolia
-  if (chainId === hardhat.id) return hardhat
-  throw new Error(`Unsupported chainId for aegis indexer: ${chainId}`)
 }
 
 async function getCursor(chainId: number, contract: Address): Promise<bigint> {
@@ -87,7 +81,7 @@ export interface AegisIndexerResult {
 export async function indexAegisEvents(
   cfg: IndexerConfig,
 ): Promise<AegisIndexerResult> {
-  const chain = chainFor(cfg.chainId)
+  const chain = viemChainFor(cfg.chainId)
   const client = createPublicClient({ chain, transport: http(cfg.rpcUrl) })
 
   const tip = await client.getBlockNumber()
@@ -274,7 +268,7 @@ async function applyCaseOpened(
   const deadlineCommit = new Date(Number(c.originalCommitDeadline) * 1000)
   const deadlineReveal = new Date(Number(c.originalRevealDeadline) * 1000)
   const arbiterPanel: { address: Address; seat: number }[] =
-    c.originalArbiter !== "0x0000000000000000000000000000000000000000"
+    c.originalArbiter !== zeroAddress
       ? [{ address: c.originalArbiter, seat: 0 }]
       : []
 
@@ -521,41 +515,6 @@ async function applyResolved(
   })
 }
 
-async function applyPanelRedrawn(cfg: IndexerConfig, args: any) {
-  const caseUuid = await findCaseUuid(cfg, args.caseId)
-  if (!caseUuid) return
-  const newPanel = (args.newPanel as Address[]).map((a, seat) => ({
-    address: a.toLowerCase(),
-    seat,
-  }))
-  // Mark current (still-active) panelists as 'redrawn' rather than deleting
-  // them — this keeps a record on each arbiter's profile that they were on
-  // a panel that stalled.
-  await db
-    .update(schema.panelMembers)
-    .set({ leftAt: new Date(), leftReason: "redrawn" })
-    .where(
-      and(
-        eq(schema.panelMembers.caseUuid, caseUuid),
-        // only those still active (not previously recused)
-        sql`${schema.panelMembers.leftAt} IS NULL`,
-      ),
-    )
-  if (newPanel.length > 0) {
-    await db.insert(schema.panelMembers).values(
-      newPanel.map((p) => ({
-        caseUuid,
-        panelistAddress: p.address,
-        seat: p.seat,
-      })),
-    )
-  }
-  await db
-    .update(schema.cases)
-    .set({ status: "open", round: 1, updatedAt: new Date() })
-    .where(eq(schema.cases.id, caseUuid))
-}
-
 async function applyStatusUpdate(
   cfg: IndexerConfig,
   caseIdHex: string,
@@ -571,80 +530,6 @@ async function applyStatusUpdate(
     .update(schema.cases)
     .set({ status, updatedAt: new Date() })
     .where(eq(schema.cases.id, caseUuid))
-}
-
-async function applyAppealPanelSeated(cfg: IndexerConfig, args: any) {
-  const caseUuid = await findCaseUuid(cfg, args.caseId)
-  if (!caseUuid) return
-  const panel = (args.panel as Address[]).map((a, seat) => ({
-    address: a.toLowerCase(),
-    seat,
-  }))
-  // Status flips to appeal_open (commit phase). Panelists land as
-  // phase='appeal' rows.
-  await db
-    .update(schema.cases)
-    .set({ status: "appeal_open", updatedAt: new Date() })
-    .where(eq(schema.cases.id, caseUuid))
-  if (panel.length > 0) {
-    await db.insert(schema.panelMembers).values(
-      panel.map((p) => ({
-        caseUuid,
-        panelistAddress: p.address,
-        seat: p.seat,
-        phase: "appeal",
-      })),
-    )
-  }
-}
-
-async function applyAppealCommitted(cfg: IndexerConfig, args: any) {
-  const caseUuid = await findCaseUuid(cfg, args.caseId)
-  if (!caseUuid) return
-  await db
-    .update(schema.panelMembers)
-    .set({ committedAt: new Date(), commitHash: args.commitHash })
-    .where(
-      and(
-        eq(schema.panelMembers.caseUuid, caseUuid),
-        eq(
-          schema.panelMembers.panelistAddress,
-          (args.arbiter as string).toLowerCase(),
-        ),
-        eq(schema.panelMembers.phase, "appeal"),
-      ),
-    )
-}
-
-async function applyAppealRevealed(cfg: IndexerConfig, args: any) {
-  const caseUuid = await findCaseUuid(cfg, args.caseId)
-  if (!caseUuid) return
-  await db
-    .update(schema.panelMembers)
-    .set({
-      revealedAt: new Date(),
-      partyAPercentage: Number(args.partyAPercentage),
-      rationaleDigest: args.rationaleDigest,
-    })
-    .where(
-      and(
-        eq(schema.panelMembers.caseUuid, caseUuid),
-        eq(
-          schema.panelMembers.panelistAddress,
-          (args.arbiter as string).toLowerCase(),
-        ),
-        eq(schema.panelMembers.phase, "appeal"),
-      ),
-    )
-  await db
-    .update(schema.cases)
-    .set({ status: "appeal_revealing", updatedAt: new Date() })
-    .where(
-      and(
-        eq(schema.cases.id, caseUuid),
-        eq(schema.cases.status, "appeal_open"),
-      ),
-    )
 }
 
 async function applyRecused(cfg: IndexerConfig, args: any) {

@@ -7,7 +7,7 @@ import {
   listBriefsForViewer,
 } from "@/lib/cases/service"
 import { findConflictsForPanel } from "@/lib/arbiters/conflicts"
-import { listBriefVersions } from "@/lib/cases/service"
+import { listBriefVersionsByBriefIds } from "@/lib/cases/service"
 import { getSession } from "@/lib/auth/session"
 import { CaseStatusBadge } from "@/components/case-status-badge"
 import { BriefEditor } from "@/components/brief-editor"
@@ -18,7 +18,7 @@ import { readArbiterProfile } from "@/lib/arbiters/profile"
 import { EvidencePanel } from "@/components/evidence-panel"
 import { CaseTimeline } from "@/components/case-timeline"
 import { assembleTimeline } from "@/lib/cases/timeline"
-import { readAppealFeeBps } from "@/lib/policy"
+import { DEFAULT_APPEAL_FEE_BPS, readAppealFeeBps } from "@/lib/policy"
 import { AppealButton } from "@/components/appeal-button"
 import { getChainData } from "@/lib/chains"
 import { EncryptedBriefViewer } from "@/components/encrypted-brief-viewer"
@@ -211,33 +211,31 @@ export default async function CaseDetailPage({
     isResolved ||
     c.status === "appealable_resolved" ||
     c.status === "appeal_awaiting_panel"
-  // Edit history for each brief — only fetch full bodies once the case has
-  // resolved publicly, otherwise just the count (so observers see "edited
-  // N times" but not the prior content while the case is in flight).
-  const briefHistories = await Promise.all(
-    briefs.map(async (b) => ({
-      briefId: b.id,
-      versions: isResolved ? await listBriefVersions(b.id) : [],
-      // Cheap count — same query, length 0 when not resolved.
-      // For pre-resolution, fetch only the count.
-    })),
+  // Edit history for each brief — one bulk query for all briefs on the
+  // page (was N+1: two findMany calls per brief × N briefs). Bodies are
+  // only surfaced post-resolution; pre-resolution we keep the count so
+  // observers can see "edited N times" without seeing prior content.
+  const versionsByBriefId = await listBriefVersionsByBriefIds(
+    briefs.map((b) => b.id),
   )
-  const editCounts = await Promise.all(
-    briefs.map(async (b) =>
-      isResolved ? null : (await listBriefVersions(b.id)).length,
-    ),
+  const briefHistories = briefs.map((b) => ({
+    briefId: b.id,
+    versions: isResolved ? (versionsByBriefId.get(b.id) ?? []) : [],
+  }))
+  const editCounts = briefs.map((b) =>
+    isResolved ? null : (versionsByBriefId.get(b.id)?.length ?? 0),
   )
   const timeline = await assembleTimeline(c.id, {
     includePrivate: isParty || isPanelist,
   })
 
   // appealFeeBps governs the AppealButton fee amount. Reads on-chain
-  // (falls back to 250 if the RPC fails). Cheap on hardhat, single
-  // call per render on real chains.
+  // (falls back to DEFAULT_APPEAL_FEE_BPS if the RPC fails). Cheap on
+  // hardhat, single call per render on real chains.
   const appealFeeBps =
     c.status === "appealable_resolved"
       ? await readAppealFeeBps(c.chainId, c.aegisAddress as `0x${string}`)
-      : 250
+      : DEFAULT_APPEAL_FEE_BPS
 
   const now = Date.now()
   // awaiting_panel cases have no deadlines yet — render as `closed` for UI

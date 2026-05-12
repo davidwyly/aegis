@@ -6,10 +6,10 @@ import {
   type Hex,
 } from "viem"
 import { privateKeyToAccount } from "viem/accounts"
-import { base, baseSepolia, hardhat } from "viem/chains"
 import { lt, eq, and, inArray, type SQL } from "drizzle-orm"
 
 import { db, schema } from "@/lib/db/client"
+import { viemChainFor } from "@/lib/chains"
 import { aegisAbi } from "@/lib/abi/aegis"
 
 interface AutoFinalizeConfig {
@@ -17,13 +17,6 @@ interface AutoFinalizeConfig {
   rpcUrl: string
   aegisAddress: Address
   privateKey: Hex
-}
-
-function chainFor(chainId: number) {
-  if (chainId === base.id) return base
-  if (chainId === baseSepolia.id) return baseSepolia
-  if (chainId === hardhat.id) return hardhat
-  throw new Error(`Unsupported chainId: ${chainId}`)
 }
 
 export interface AutoFinalizeResult {
@@ -44,7 +37,7 @@ export async function autoFinalizePending(
   cfg: AutoFinalizeConfig,
 ): Promise<AutoFinalizeResult> {
   const now = new Date()
-  const chain = chainFor(cfg.chainId)
+  const chain = viemChainFor(cfg.chainId)
   const publicClient = createPublicClient({ chain, transport: http(cfg.rpcUrl) })
   const account = privateKeyToAccount(cfg.privateKey)
   const walletClient = createWalletClient({

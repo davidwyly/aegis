@@ -1,20 +1,12 @@
 import "server-only"
 import { createPublicClient, erc20Abi, http } from "viem"
-import { supportedChains } from "@/lib/chains"
+import { rpcUrlFor, supportedChains } from "@/lib/chains"
 import { aegisAbi } from "@/lib/abi/aegis"
-
-function rpcFor(chainId: number): string | undefined {
-  if (chainId === 8453) return process.env.NEXT_PUBLIC_BASE_RPC_URL
-  if (chainId === 84532) return process.env.NEXT_PUBLIC_BASE_SEPOLIA_RPC_URL
-  if (chainId === 31337)
-    return process.env.NEXT_PUBLIC_HARDHAT_RPC_URL ?? "http://127.0.0.1:8545"
-  return undefined
-}
 
 function publicClientFor(chainId: number) {
   const chain = supportedChains.find((c) => c.id === chainId)
   if (!chain) return null
-  return createPublicClient({ chain, transport: http(rpcFor(chainId)) })
+  return createPublicClient({ chain, transport: http(rpcUrlFor(chainId)) })
 }
 
 export async function readLockedStake(

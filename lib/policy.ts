@@ -1,15 +1,9 @@
 import "server-only"
 import { createPublicClient, http } from "viem"
-import { supportedChains } from "@/lib/chains"
+import { rpcUrlFor, supportedChains } from "@/lib/chains"
 import { aegisAbi } from "@/lib/abi/aegis"
 
-const DEFAULT_APPEAL_FEE_BPS = 250
-
-const RPC_URL_ENV: Record<number, string | undefined> = {
-  8453: process.env.NEXT_PUBLIC_BASE_RPC_URL,
-  84532: process.env.NEXT_PUBLIC_BASE_SEPOLIA_RPC_URL,
-  31337: process.env.NEXT_PUBLIC_HARDHAT_RPC_URL ?? "http://127.0.0.1:8545",
-}
+export const DEFAULT_APPEAL_FEE_BPS = 250
 
 export async function readAppealFeeBps(
   chainId: number,
@@ -20,7 +14,7 @@ export async function readAppealFeeBps(
   try {
     const client = createPublicClient({
       chain,
-      transport: http(RPC_URL_ENV[chainId]),
+      transport: http(rpcUrlFor(chainId)),
     })
     const policy = (await client.readContract({
       address: aegisAddress,

@@ -3,20 +3,21 @@ import {
   createWalletClient,
   http,
   parseAbi,
+  zeroAddress,
+  zeroHash,
   type Address,
   type Hex,
 } from "viem"
 import { privateKeyToAccount } from "viem/accounts"
 import { eq, and } from "drizzle-orm"
-import { base, baseSepolia, hardhat } from "viem/chains"
 
 import { db, schema } from "@/lib/db/client"
+import { viemChainFor } from "@/lib/chains"
 import { aegisAbi } from "@/lib/abi/aegis"
 import { vaultraAdapterAbi } from "@/lib/abi/vaultra-adapter"
 import { vaultraDisputeEventsAbi } from "@/lib/abi/vaultra-events"
 import { recordCaseOpened } from "@/lib/cases/service"
 
-const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as const
 import { indexAegisEvents, type AegisIndexerResult } from "./aegis-indexer"
 import { autoFinalizePending, type AutoFinalizeResult } from "./auto-finalize"
 import { recordFailure, markResolved } from "./failures"
@@ -41,13 +42,6 @@ interface KeeperConfig {
   adapterAddress: Address
   vaultraAddress: Address
   privateKey: Hex
-}
-
-function chainFor(chainId: number) {
-  if (chainId === base.id) return base
-  if (chainId === baseSepolia.id) return baseSepolia
-  if (chainId === hardhat.id) return hardhat
-  throw new Error(`Unsupported chainId for keeper: ${chainId}`)
 }
 
 async function getCursor(
@@ -116,7 +110,7 @@ export interface KeeperTickResult {
  * can log progress.
  */
 export async function keeperTick(cfg: KeeperConfig): Promise<KeeperTickResult> {
-  const chain = chainFor(cfg.chainId)
+  const chain = viemChainFor(cfg.chainId)
   const publicClient = createPublicClient({ chain, transport: http(cfg.rpcUrl) })
   const account = privateKeyToAccount(cfg.privateKey)
   const walletClient = createWalletClient({
@@ -202,10 +196,7 @@ export async function keeperTick(cfg: KeeperConfig): Promise<KeeperTickResult> {
         functionName: "liveCaseFor",
         args: [cfg.adapterAddress, expectedCaseId],
       })) as Hex
-      if (
-        live !==
-        "0x0000000000000000000000000000000000000000000000000000000000000000"
-      ) {
+      if (live !== zeroHash) {
         continue
       }
 
@@ -262,7 +253,7 @@ export async function keeperTick(cfg: KeeperConfig): Promise<KeeperTickResult> {
       // address — recordCaseOpened tolerates an empty panel and the
       // ArbiterDrawn event handler fills the panel later.
       const arbiterPanel: { address: Address; seat: number }[] =
-        c.originalArbiter !== ZERO_ADDRESS
+        c.originalArbiter !== zeroAddress
           ? [{ address: c.originalArbiter, seat: 0 }]
           : []
 

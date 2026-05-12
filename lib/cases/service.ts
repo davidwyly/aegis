@@ -434,6 +434,31 @@ export async function listBriefVersions(briefId: string) {
   })
 }
 
+/**
+ * Bulk variant — fetch versions for many briefs in a single query and
+ * group by briefId. Callers that render N briefs would otherwise issue
+ * N round-trips through listBriefVersions.
+ */
+export async function listBriefVersionsByBriefIds(
+  briefIds: string[],
+): Promise<Map<string, Awaited<ReturnType<typeof listBriefVersions>>>> {
+  const grouped = new Map<
+    string,
+    Awaited<ReturnType<typeof listBriefVersions>>
+  >()
+  for (const id of briefIds) grouped.set(id, [])
+  if (briefIds.length === 0) return grouped
+  const rows = await db.query.briefVersions.findMany({
+    where: inArray(schema.briefVersions.briefId, briefIds),
+    orderBy: (v, { asc }) => [asc(v.version)],
+  })
+  for (const r of rows) {
+    const bucket = grouped.get(r.briefId)
+    if (bucket) bucket.push(r)
+  }
+  return grouped
+}
+
 export async function getMyBrief(caseUuid: string, address: `0x${string}`) {
   return db.query.briefs.findFirst({
     where: (b, { eq, and }) =>
