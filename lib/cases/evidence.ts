@@ -1,6 +1,6 @@
 import "server-only"
 import { createHash } from "node:crypto"
-import { eq, inArray, sql } from "drizzle-orm"
+import { eq, inArray } from "drizzle-orm"
 import { db, schema } from "@/lib/db/client"
 
 export const EVIDENCE_MAX_BYTES = 2 * 1024 * 1024 // 2 MB
@@ -71,9 +71,10 @@ export class EvidenceError extends Error {
  * Canonical filename sanitiser. Returns null when the input is empty,
  * `.`, `..`, or contains `..` after sanitisation — those names are
  * either zero-information or zip-slip-able and must be rejected by
- * every caller. Upload path treats null as FILENAME_REQUIRED; the ZIP
- * route treats it as "fall back to a synthetic id-prefixed name so the
- * file still lands in the bundle".
+ * every caller. Upload path checks empty-after-trim *before* calling
+ * this (mapping that to FILENAME_REQUIRED) and treats a null return
+ * here as FILENAME_INVALID; the ZIP route treats null as "fall back
+ * to a synthetic id-prefixed name so the file still lands".
  *
  * Rules:
  *   - replace any char outside [A-Za-z0-9._-] with `_`
@@ -291,32 +292,6 @@ export async function downloadEvidence(
 
 export interface EvidenceWithContent extends EvidenceListItem {
   content: Buffer
-}
-
-/**
- * Cheap pre-flight for the ZIP route: returns (rowCount, totalBytes)
- * for the case without loading any rows, so the route can fail fast
- * before listEvidenceForViewer materialises the metadata list. The
- * count is case-wide (no viewer filtering) — visible-to-viewer counts
- * are always ≤ the case-wide count, so over-cap on the case-wide count
- * means over-cap on anything any viewer would see. A non-spammed case
- * fits comfortably under the caps and the preflight is a no-op.
- */
-export async function evidenceCasePreflight(caseUuid: string): Promise<{
-  count: number
-  totalBytes: number
-}> {
-  const [row] = await db
-    .select({
-      count: sql<number>`count(*)::int`,
-      totalBytes: sql<number>`coalesce(sum(${schema.evidenceFiles.size}),0)::bigint`,
-    })
-    .from(schema.evidenceFiles)
-    .where(eq(schema.evidenceFiles.caseUuid, caseUuid))
-  // SUM returns a bigint via the cast; coerce to number — sizes are
-  // already bounded by EVIDENCE_MAX_BYTES per row, so the total fits
-  // comfortably in a double.
-  return { count: row?.count ?? 0, totalBytes: Number(row?.totalBytes ?? 0) }
 }
 
 /**

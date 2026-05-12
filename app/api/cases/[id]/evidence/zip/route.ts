@@ -1,6 +1,5 @@
 import JSZip from "jszip"
 import {
-  evidenceCasePreflight,
   fetchEvidenceContentByIds,
   listEvidenceForViewer,
   sanitiseFileName,
@@ -41,27 +40,12 @@ export async function GET(
   if (!session.address) {
     return new Response("No evidence visible", { status: 404 })
   }
-  // Aggregate preflight — case-wide COUNT + SUM(size) in one query, no
-  // row materialisation. A case with thousands of attachments (an
-  // upload-spam vector) fails here without listEvidenceForViewer ever
-  // running. The caps are case-wide; visible-to-viewer counts are
-  // always ≤ this, so over-cap here means over-cap for any viewer.
-  const pre = await evidenceCasePreflight(id)
-  if (pre.count > MAX_BUNDLE_FILES) {
-    return new Response(
-      `Bundle exceeds the ${MAX_BUNDLE_FILES}-file limit`,
-      { status: 413 },
-    )
-  }
-  if (pre.totalBytes > MAX_BUNDLE_BYTES) {
-    return new Response(
-      `Bundle exceeds the ${MAX_BUNDLE_BYTES}-byte limit`,
-      { status: 413 },
-    )
-  }
-  // Two-pass: pull metadata-only summaries first and re-check viewer-
-  // scoped caps before touching the content bytea (preflight is case-
-  // wide; the per-viewer slice may differ for non-resolved cases).
+  // Two-pass: pull metadata-only summaries (no content bytea) first
+  // and apply caps on the viewer-scoped list. Doing the cap check
+  // case-wide would leak the case's evidence size to authenticated-
+  // but-unauthorized callers and 413 incorrectly when the viewer's
+  // own slice is under cap. The metadata fetch excludes the content
+  // column, so even a large evidence list is small in bytes.
   const summaries = await listEvidenceForViewer(id, session.address)
   if (summaries.length === 0) {
     return new Response("No evidence visible", { status: 404 })
