@@ -49,8 +49,12 @@ const APPEAL_STATUS_MAP = {
   appeal_revealing: "revealing",
 } as const satisfies Partial<Record<CaseStatus, CaseStatus>>
 
+type LeakingAppealStatus = keyof typeof APPEAL_STATUS_MAP
+
+function isLeakingAppealStatus(s: CaseStatus): s is LeakingAppealStatus {
+  return s in APPEAL_STATUS_MAP
+}
+
 export function sanitizeStatusForArbiter(status: CaseStatus): CaseStatus {
-  return (
-    (APPEAL_STATUS_MAP as Record<string, CaseStatus>)[status] ?? status
-  )
+  return isLeakingAppealStatus(status) ? APPEAL_STATUS_MAP[status] : status
 }

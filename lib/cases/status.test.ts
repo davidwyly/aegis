@@ -28,12 +28,38 @@ describe("sanitizeStatusForArbiter", () => {
     }
   })
 
-  it("covers every case status", () => {
-    // Guard against drift: if a new status is added to CASE_STATUSES,
-    // this test forces a decision about whether it leaks appeal context.
+  it("never returns a status starting with 'appeal_'", () => {
+    // Drift guard: the appeal_* prefix is the leak signal. If a new
+    // appeal_* value is added to CASE_STATUSES and the maintainer
+    // forgets to add it to APPEAL_STATUS_MAP, the input would fall
+    // through unchanged and this assertion fires. (Note: this is
+    // intentionally distinct from `appealable_resolved`, which has a
+    // different prefix and is fine for arbiters to see — they have
+    // already revealed by then.)
     for (const s of CASE_STATUSES) {
       const sanitized = sanitizeStatusForArbiter(s)
-      expect(CASE_STATUSES).toContain(sanitized)
+      expect(sanitized.startsWith("appeal_")).toBe(false)
+    }
+  })
+
+  it("matches an explicit expected mapping", () => {
+    // Frozen expectations — adding a new arbiter-visible appeal_*
+    // status REQUIRES adding it here so the drift is forced through
+    // review rather than silently passing.
+    const expected: Record<CaseStatus, CaseStatus> = {
+      awaiting_panel: "awaiting_panel",
+      open: "open",
+      revealing: "revealing",
+      appealable_resolved: "appealable_resolved",
+      appeal_awaiting_panel: "awaiting_panel",
+      appeal_open: "open",
+      appeal_revealing: "revealing",
+      resolved: "resolved",
+      default_resolved: "default_resolved",
+      stalled: "stalled",
+    }
+    for (const s of CASE_STATUSES) {
+      expect(sanitizeStatusForArbiter(s)).toBe(expected[s])
     }
   })
 })
