@@ -34,6 +34,7 @@ import {
   phaseFor,
   railCountdown,
 } from "./_helpers"
+import { isResolvedCaseStatus } from "@/lib/cases/status"
 
 // Always server-render — the case state, panel, and brief visibility
 // depend on the viewer's session and on-chain progress.
@@ -97,7 +98,7 @@ export default async function CaseDetailPage({
   // the summary list (no file content) for the count only; EvidencePanel
   // still does its own client-side fetch for the live render.
   const evidenceCount = (await listEvidenceForViewer(c.id, viewer)).length
-  const isResolved = c.status === "resolved" || c.status === "default_resolved"
+  const isResolved = isResolvedCaseStatus(c.status)
   // D13 soft anonymity — public observers must not see assigned
   // arbiter identities while the case is in flight (would enable
   // bribery targeting). Parties may see them (they're stakeholders);
@@ -300,10 +301,7 @@ export default async function CaseDetailPage({
         </section>
       )}
 
-      {(isParty ||
-        isPanelist ||
-        c.status === "resolved" ||
-        c.status === "default_resolved") && (
+      {(isParty || isPanelist || isResolved) && (
         <section className="card">
           <div className="flex items-baseline justify-between gap-3">
             <h2 className="text-sm font-medium uppercase tracking-wide text-zinc-500">
