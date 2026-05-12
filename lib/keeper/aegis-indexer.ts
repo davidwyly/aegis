@@ -134,7 +134,7 @@ export async function indexAegisEvents(
         case "ArbiterDrawn": {
           // Phase-agnostic arbiter assignment (de novo). Routes to
           // the right slot based on current case state.
-          await applyArbiterDrawn(cfg, decoded.args)
+          await applyArbiterDrawn(cfg, client, decoded.args)
           break
         }
         case "ArbiterRedrawn": {
@@ -296,6 +296,7 @@ async function applyCaseOpened(
 ///   members to assign seat 0 or 1
 async function applyArbiterDrawn(
   cfg: IndexerConfig,
+  client: PublicClient,
   args: ArgsFor<"ArbiterDrawn">,
 ) {
   const caseUuid = await findCaseUuid(cfg, args.caseId)
@@ -365,6 +366,39 @@ async function applyArbiterDrawn(
       phase,
     })
     .onConflictDoNothing()
+
+  // Mirror the live phase's deadlines from chain so cases.deadlineCommit
+  // / cases.deadlineReveal always point at the currently-open window
+  // rather than freezing at the original phase's deadlines.
+  // - `_drawOriginal` resets the original deadlines on each call
+  //   (initial draw or stall redraw).
+  // - `_drawAppealPanel` writes separate appealCommitDeadline /
+  //   appealRevealDeadline fields.
+  // The DB has only one pair, so we point it at whatever phase the
+  // just-drawn arbiter is in. Voluntary `recuse` does NOT shift
+  // deadlines on chain — the replacement inherits the same window —
+  // so applyArbiterRedrawn doesn't need this mirror.
+  const onchain = await client.readContract({
+    address: cfg.aegisAddress,
+    abi: aegisAbi,
+    functionName: "getCase",
+    args: [args.caseId],
+  })
+  const commitTs =
+    phase === "appeal"
+      ? onchain.appealCommitDeadline
+      : onchain.originalCommitDeadline
+  const revealTs =
+    phase === "appeal"
+      ? onchain.appealRevealDeadline
+      : onchain.originalRevealDeadline
+  await db
+    .update(schema.cases)
+    .set({
+      deadlineCommit: new Date(Number(commitTs) * 1000),
+      deadlineReveal: new Date(Number(revealTs) * 1000),
+    })
+    .where(eq(schema.cases.id, caseUuid))
 }
 
 /// Voluntary recusal — replace `previousArbiter` with `replacement` at
