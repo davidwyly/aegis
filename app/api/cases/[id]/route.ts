@@ -1,6 +1,4 @@
 import { NextResponse } from "next/server"
-import { and, eq, isNull } from "drizzle-orm"
-import { db, schema } from "@/lib/db/client"
 import {
   getCaseById,
   getPanel,
@@ -8,23 +6,10 @@ import {
 } from "@/lib/cases/service"
 import { getSession } from "@/lib/auth/session"
 import {
+  isResolvedCaseStatus,
   sanitizeStatusForArbiter,
   type CaseStatus,
 } from "@/lib/cases/status"
-
-async function isViewerAssignedArbiter(
-  caseUuid: string,
-  viewer: string,
-): Promise<boolean> {
-  const member = await db.query.panelMembers.findFirst({
-    where: and(
-      eq(schema.panelMembers.caseUuid, caseUuid),
-      eq(schema.panelMembers.panelistAddress, viewer.toLowerCase()),
-      isNull(schema.panelMembers.leftAt),
-    ),
-  })
-  return !!member
-}
 
 export async function GET(
   _req: Request,
@@ -37,25 +22,33 @@ export async function GET(
   const session = await getSession()
   const viewer = session.address ?? null
 
-  // De novo: an assigned arbiter must not learn from this endpoint
-  // whether the case is in the original or appeal phase. We sanitize
-  // the status, and omit the panel listing — its membership composition
-  // (presence/absence of the original arbiter's address vs an appeal
-  // arbiter's) would otherwise reveal which phase has been seated.
-  // The contract excludes parties from being drawn, so a viewer is
-  // never simultaneously a party and an assigned arbiter on the same
-  // case; the order of these checks doesn't matter.
-  const isAssignedArbiter =
-    viewer !== null && (await isViewerAssignedArbiter(caseRow.id, viewer))
+  // De novo: this endpoint defaults to the arbiter-safe shape (no
+  // phase leakage in `case.status`, empty `panel` listing). The full
+  // raw shape is returned only when one of these is true:
+  //   - the viewer is a party on this case (they need raw phase info)
+  //   - the case is post-resolution (public record; nothing left to hide)
+  //
+  // We DON'T gate sanitization on "the viewer happens to be an
+  // assigned arbiter" — an arbiter could just clear cookies and
+  // re-query, so the default for everyone-not-a-party is the safe
+  // shape. The contract excludes parties from being drawn, so the
+  // party branch is never reached by an assigned arbiter on the
+  // same case.
+  const isParty =
+    viewer !== null &&
+    (viewer.toLowerCase() === caseRow.partyA.toLowerCase() ||
+      viewer.toLowerCase() === caseRow.partyB.toLowerCase())
+  const isResolved = isResolvedCaseStatus(caseRow.status)
+  const showRaw = isParty || isResolved
 
-  const responseCase = isAssignedArbiter
-    ? {
+  const responseCase = showRaw
+    ? caseRow
+    : {
         ...caseRow,
         status: sanitizeStatusForArbiter(caseRow.status as CaseStatus),
       }
-    : caseRow
 
-  const panel = isAssignedArbiter ? [] : await getPanel(caseRow.id)
+  const panel = showRaw ? await getPanel(caseRow.id) : []
   const briefs = await listBriefsForViewer(caseRow.id, viewer)
 
   return NextResponse.json({
