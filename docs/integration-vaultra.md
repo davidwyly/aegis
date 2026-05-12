@@ -1,7 +1,11 @@
 # Plugging Vaultra into Aegis
 
-This is the one-pager. The Aegis-side rationale lives in the design plan;
-this doc is just the pragmatic checklist.
+This is the one-pager runbook — deploy order, smoke test, ops
+dependencies. For the cross-repo architecture (caseId contract, fee
+plumbing, vendored-escrow sync, adapter rotation), see
+[`integration-architecture.md`](./integration-architecture.md). Vaultra's
+side of the same picture lives in
+[its `docs/aegis-integration.md`](https://github.com/davidwyly/vaultra/blob/main/docs/aegis-integration.md).
 
 ## What you need before you start
 

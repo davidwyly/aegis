@@ -5,7 +5,7 @@ import { buildModule } from "@nomicfoundation/hardhat-ignition/modules"
  * VaultraEscrow. After deploy, the Vaultra owner must call
  * `updateEclipseDAO(adapter)` so new escrows default arbiter to the adapter.
  *
- *   pnpm -C blockchain hardhat ignition deploy ignition/modules/VaultraAdapter.ts \
+ *   cd blockchain && pnpm exec hardhat ignition deploy ignition/modules/VaultraAdapter.ts \
  *     --network baseSepolia \
  *     --parameters '{"VaultraAdapter": {"aegis": "0x…", "vaultra": "0x…"}}'
  */
