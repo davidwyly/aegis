@@ -1092,7 +1092,11 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
         // The share assignment keeps the floor so totalPayout never
         // exceeds totalPot.
         uint256 numerator = c.amount * p.perArbiterFeeBps;
-        uint256 perArbiterCeil = (numerator + BPS_DENOMINATOR - 1) / BPS_DENOMINATOR;
+        // OZ-standard overflow-safe ceil-div: subtract-then-add avoids the
+        // narrow revert window the (n + d - 1)/d form has near uint256 max.
+        uint256 perArbiterCeil = numerator == 0
+            ? 0
+            : (numerator - 1) / BPS_DENOMINATOR + 1;
         uint256 perArbiterShare;
         // slither-disable-next-line divide-before-multiply
         if (perArbiterCeil * payableCount <= totalPot) {
