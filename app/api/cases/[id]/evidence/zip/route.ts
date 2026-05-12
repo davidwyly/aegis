@@ -33,19 +33,14 @@ export async function GET(
 ) {
   const { id } = await params
   const session = await getSession()
-  // Short-circuit anonymous callers — listEvidenceForViewer hits the
-  // case + evidence rows before checking viewer, so without this every
-  // unauthenticated request to a public URL would scan the evidence
-  // table. Same visible behaviour either way (empty → 404), but cheap.
-  if (!session.address) {
-    return new Response("No evidence visible", { status: 404 })
-  }
   // Two-pass: pull metadata-only summaries (no content bytea) first
   // and apply caps on the viewer-scoped list. listEvidenceForViewer
-  // now pushes the visibility predicate into SQL AND honours an
-  // optional cap; we request MAX_BUNDLE_FILES+1 rows so that
-  // detecting cap+1 ⇒ 413 works without ever fetching a bigger list.
-  const summaries = await listEvidenceForViewer(id, session.address, {
+  // returns [] immediately on a null viewer (anonymous callers fall
+  // through to the empty-summaries 404 below), and pushes the
+  // visibility predicate into SQL with an optional cap — we request
+  // MAX_BUNDLE_FILES+1 rows so detecting cap+1 ⇒ 413 works without
+  // materialising a bigger list.
+  const summaries = await listEvidenceForViewer(id, session.address ?? null, {
     limit: MAX_BUNDLE_FILES + 1,
   })
   if (summaries.length === 0) {
