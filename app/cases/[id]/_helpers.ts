@@ -1,4 +1,4 @@
-import { isResolvedCaseStatus } from "@/lib/db/schema"
+import { isResolvedCaseStatus } from "@/lib/cases/status"
 
 export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`

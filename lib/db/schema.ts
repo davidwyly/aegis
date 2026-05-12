@@ -17,6 +17,7 @@ import {
 } from "drizzle-orm/pg-core"
 import { sql, type InferSelectModel, type InferInsertModel } from "drizzle-orm"
 import type { SealedBrief, SealedKey } from "@/lib/crypto/seal"
+import { CASE_STATUSES } from "@/lib/cases/status"
 
 // Custom bytea type — Postgres binary blob with Buffer round-trip. Used
 // for inline evidence storage (small files only; >2 MB belongs in object
@@ -168,34 +169,17 @@ export const arbiterConflicts = pgTable(
 // list, brief storage, and a public ledger.
 // ============================================================
 
-export const caseStatusEnum = pgEnum("case_status", [
-  "awaiting_panel", // CaseRequested seen; VRF callback still pending
-  "open",
-  "revealing",
-  // Appeals lifecycle
-  "appealable_resolved", // original-panel verdict staged; appeal window open
-  "appeal_awaiting_panel", // VRF requested for the appeal panel
-  "appeal_open", // appeal commit phase
-  "appeal_revealing", // appeal reveal phase
-  // Terminal
-  "resolved",
-  "default_resolved",
-  "stalled",
-])
-export const CASE_STATUSES = caseStatusEnum.enumValues
-export type CaseStatus = (typeof CASE_STATUSES)[number]
-// Post-resolution states — a verdict is on file. `stalled` is also
-// "terminal" in the lifecycle sense (no further progress), but it has
-// NO verdict, so it is intentionally excluded from the visibility
-// gates that flip brief/evidence access to the opposing party.
-export const RESOLVED_CASE_STATUSES = [
-  "resolved",
-  "default_resolved",
-] as const satisfies readonly CaseStatus[]
-export type ResolvedCaseStatus = (typeof RESOLVED_CASE_STATUSES)[number]
-export function isResolvedCaseStatus(s: string): s is ResolvedCaseStatus {
-  return (RESOLVED_CASE_STATUSES as readonly string[]).includes(s)
-}
+// Built from the canonical tuple in `lib/cases/status.ts` so the
+// on-disk enum and the app-side `CaseStatus` type stay in lockstep.
+// Re-exported from there for callers that want types + predicates
+// without paying the server-only drizzle import.
+export const caseStatusEnum = pgEnum("case_status", CASE_STATUSES)
+export {
+  CASE_STATUSES,
+  RESOLVED_CASE_STATUSES,
+  isResolvedCaseStatus,
+} from "@/lib/cases/status"
+export type { CaseStatus, ResolvedCaseStatus } from "@/lib/cases/status"
 
 export const cases = pgTable(
   "cases",
