@@ -182,6 +182,20 @@ export const caseStatusEnum = pgEnum("case_status", [
   "default_resolved",
   "stalled",
 ])
+export const CASE_STATUSES = caseStatusEnum.enumValues
+export type CaseStatus = (typeof CASE_STATUSES)[number]
+// Post-resolution states — a verdict is on file. `stalled` is also
+// "terminal" in the lifecycle sense (no further progress), but it has
+// NO verdict, so it is intentionally excluded from the visibility
+// gates that flip brief/evidence access to the opposing party.
+export const RESOLVED_CASE_STATUSES = [
+  "resolved",
+  "default_resolved",
+] as const satisfies readonly CaseStatus[]
+export type ResolvedCaseStatus = (typeof RESOLVED_CASE_STATUSES)[number]
+export function isResolvedCaseStatus(s: string): s is ResolvedCaseStatus {
+  return (RESOLVED_CASE_STATUSES as readonly string[]).includes(s)
+}
 
 export const cases = pgTable(
   "cases",

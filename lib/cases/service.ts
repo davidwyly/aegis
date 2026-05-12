@@ -1,6 +1,11 @@
 import "server-only"
 import { eq, and, desc, lt, or, sql, inArray } from "drizzle-orm"
 import { db, schema } from "@/lib/db/client"
+import {
+  isResolvedCaseStatus,
+  type CaseStatus,
+  type ResolvedCaseStatus,
+} from "@/lib/db/schema"
 import { z } from "zod"
 
 export interface OnchainCaseRequestedSnapshot {
@@ -145,7 +150,7 @@ export async function recordCaseOpened(snap: OnchainCaseSnapshot): Promise<{
  */
 export async function recordResolution(opts: {
   caseUuid: string
-  status: "resolved" | "default_resolved"
+  status: ResolvedCaseStatus
   medianPercentage: number
   finalDigest: `0x${string}`
   resolutionTxHash: `0x${string}`
@@ -173,18 +178,7 @@ export async function recordResolution(opts: {
  */
 export interface ListLedgerInput {
   chainId?: number
-  status?: Array<
-    | "awaiting_panel"
-    | "open"
-    | "revealing"
-    | "appealable_resolved"
-    | "appeal_awaiting_panel"
-    | "appeal_open"
-    | "appeal_revealing"
-    | "resolved"
-    | "default_resolved"
-    | "stalled"
-  >
+  status?: CaseStatus[]
   cursor?: string | null
   limit?: number
 }
@@ -533,8 +527,7 @@ export async function listBriefsForViewer(
   if (!caseRow) return []
   const isParty =
     v === caseRow.partyA.toLowerCase() || v === caseRow.partyB.toLowerCase()
-  const isResolved =
-    caseRow.status === "resolved" || caseRow.status === "default_resolved"
+  const isResolved = isResolvedCaseStatus(caseRow.status)
 
   if (isParty && !isResolved) {
     return all.filter((b) => b.authorAddress.toLowerCase() === v)

@@ -2,6 +2,7 @@ import "server-only"
 import { createHash } from "node:crypto"
 import { and, eq, inArray, type SQL } from "drizzle-orm"
 import { db, schema } from "@/lib/db/client"
+import { isResolvedCaseStatus } from "@/lib/db/schema"
 import type { SealedKey } from "@/lib/crypto/seal"
 
 export const EVIDENCE_MAX_BYTES = 2 * 1024 * 1024 // 2 MB
@@ -225,8 +226,7 @@ export async function listEvidenceForViewer(
   const v = viewer.toLowerCase()
   const isParty =
     v === caseRow.partyA.toLowerCase() || v === caseRow.partyB.toLowerCase()
-  const isResolved =
-    caseRow.status === "resolved" || caseRow.status === "default_resolved"
+  const isResolved = isResolvedCaseStatus(caseRow.status)
 
   // Choose the SQL predicate that matches the viewer's role. Falling
   // through to `null` means "no rows visible" and we skip the SELECT
