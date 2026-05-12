@@ -10,12 +10,31 @@ import {
   type CaseStatus,
 } from "@/lib/cases/status"
 
+// Parse a query-param string as a positive integer. Returns
+// `undefined` for a missing param so the caller falls through to
+// listLedger's default; returns `null` for an invalid one so the
+// caller can 400 explicitly rather than letting NaN propagate into
+// the SQL layer.
+function parsePositiveInt(raw: string | null): number | null | undefined {
+  if (raw === null) return undefined
+  if (!/^\d+$/.test(raw)) return null
+  const n = Number(raw)
+  return Number.isFinite(n) && n > 0 ? n : null
+}
+
 export async function GET(req: Request) {
   const url = new URL(req.url)
-  const chainId = url.searchParams.get("chainId")
-  const limit = url.searchParams.get("limit")
+  const chainId = parsePositiveInt(url.searchParams.get("chainId"))
+  const limit = parsePositiveInt(url.searchParams.get("limit"))
   const cursor = url.searchParams.get("cursor")
   const statusParam = url.searchParams.getAll("status")
+
+  if (chainId === null || limit === null) {
+    return NextResponse.json(
+      { error: "chainId and limit must be positive integers" },
+      { status: 400 },
+    )
+  }
 
   // The filter vocabulary is the arbiter-safe vocabulary — any
   // `appeal_*` value passed by the caller is silently dropped, not
@@ -44,8 +63,8 @@ export async function GET(req: Request) {
       : []
 
   const { rows, nextCursor } = await listLedger({
-    chainId: chainId ? Number(chainId) : undefined,
-    limit: limit ? Number(limit) : undefined,
+    chainId,
+    limit,
     cursor: cursor ?? null,
     status: rawStatuses.length > 0 ? rawStatuses : undefined,
   })
