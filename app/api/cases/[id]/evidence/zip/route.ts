@@ -80,9 +80,22 @@ export async function GET(
   // the extraction root. Re-run the same sanitiser at write time; on
   // rejection, fall back to a synthetic id-prefixed name so the file
   // still lands in the bundle.
-  const manifest = summaries.flatMap((it) => {
-    const content = contentById.get(it.id)
-    if (!content) return []
+  // If any id is missing between the metadata pass and the content
+  // pass, fail loudly instead of silently shipping a partial ZIP. The
+  // alternative — flatMap-skip — would 200 with a manifest claiming N
+  // files but only N-1 actual entries, which is impossible for the
+  // client to detect.
+  const missing = summaries
+    .map((s) => s.id)
+    .filter((id) => !contentById.has(id))
+  if (missing.length > 0) {
+    return new Response(
+      `Evidence content missing for ${missing.length} file(s); please retry`,
+      { status: 500 },
+    )
+  }
+  const manifest = summaries.map((it) => {
+    const content = contentById.get(it.id)!
     const folder = safeFolder(it.groupName)
     const baseName = sanitiseFileName(it.fileName) ?? `file-${it.id.slice(0, 8)}`
     // De-dupe colliding filenames within the same folder. First try the
@@ -99,20 +112,18 @@ export async function GET(
     }
     used.add(entryName)
     zip.file(entryName, content)
-    return [
-      {
-        file: entryName,
-        role: it.role,
-        uploaderAddress: it.uploaderAddress,
-        uploadedAt: it.uploadedAt,
-        mimeType: it.mimeType,
-        size: it.size,
-        sha256: it.sha256,
-        isEncrypted: it.isEncrypted,
-        bodyNonce: it.bodyNonce,
-        sealedRecipients: it.sealedRecipients,
-      },
-    ]
+    return {
+      file: entryName,
+      role: it.role,
+      uploaderAddress: it.uploaderAddress,
+      uploadedAt: it.uploadedAt,
+      mimeType: it.mimeType,
+      size: it.size,
+      sha256: it.sha256,
+      isEncrypted: it.isEncrypted,
+      bodyNonce: it.bodyNonce,
+      sealedRecipients: it.sealedRecipients,
+    }
   })
   zip.file(
     "manifest.json",
