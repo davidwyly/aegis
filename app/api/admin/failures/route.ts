@@ -32,9 +32,13 @@ export async function GET() {
 export async function POST(req: Request) {
   // Body: { id: string, action: "resolve" }
   // Single endpoint — keeps the API surface minimal until we need more verbs.
+  // 401 vs 403 split lets clients distinguish "sign in" from "you're
+  // signed in but not on the admin allowlist".
   const session = await getSession()
-  const allow = adminAddresses()
-  if (!session.address || !allow.has(session.address.toLowerCase())) {
+  if (!session.address) {
+    return NextResponse.json({ error: "unauthorized" }, { status: 401 })
+  }
+  if (!adminAddresses().has(session.address.toLowerCase())) {
     return NextResponse.json({ error: "forbidden" }, { status: 403 })
   }
   try {
