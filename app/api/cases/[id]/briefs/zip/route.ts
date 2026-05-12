@@ -69,7 +69,10 @@ export async function GET(
     ),
   )
 
-  const buffer = await zip.generateAsync({ type: "uint8array" })
+  // ArrayBuffer rather than uint8array — TS 5.7+ types Uint8Array as
+  // Uint8Array<ArrayBufferLike>, which isn't directly assignable to
+  // BodyInit. ArrayBuffer is. Same bytes on the wire either way.
+  const buffer = await zip.generateAsync({ type: "arraybuffer" })
   return new Response(buffer, {
     status: 200,
     headers: {
