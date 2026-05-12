@@ -1,4 +1,4 @@
-import { isResolvedCaseStatus } from "@/lib/cases/status"
+import { isResolvedCaseStatus, type CaseStatus } from "@/lib/cases/status"
 
 export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
@@ -12,7 +12,7 @@ export function formatBytes(bytes: number): string {
 // deadline timestamp so the caller can color-escalate the display
 // (zinc → amber → red) per ux-design.md invariant #3.
 export function railCountdown(args: {
-  status: string
+  status: CaseStatus
   deadlineCommit: Date | string | null
   deadlineReveal: Date | string | null
   now: number
@@ -65,7 +65,7 @@ export function countdownColor(
 // per de novo blindness — they should not know which phase they're
 // arbitrating.
 export function phaseFor(args: {
-  status: string
+  status: CaseStatus
   isAssignedArbiter: boolean
 }): { text: string; band: string } {
   const { status, isAssignedArbiter } = args

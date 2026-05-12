@@ -171,8 +171,9 @@ export const arbiterConflicts = pgTable(
 
 // Built from the canonical tuple in `lib/cases/status.ts` so the
 // on-disk enum and the app-side `CaseStatus` type stay in lockstep.
-// Re-exported from there for callers that want types + predicates
-// without paying the server-only drizzle import.
+// The re-exports below are for existing server-side callers — client
+// code should import from `@/lib/cases/status` directly, since this
+// module is `server-only`.
 export const caseStatusEnum = pgEnum("case_status", CASE_STATUSES)
 export {
   CASE_STATUSES,
