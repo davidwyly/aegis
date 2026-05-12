@@ -47,10 +47,10 @@ describe("sanitiseFileName", () => {
     expect(sanitiseFileName("..bad..")).toBeNull()
   })
 
-  it("rejects path separators-only names", () => {
-    // After replacement these become "_" / "__" — accepted as a normal
-    // (if useless) filename. Only the literal . / .. / traversal cases
-    // are zip-slip-able, which is what we care about.
+  it("sanitises path-separator-only names to underscores", () => {
+    // After replacement these become a literal "_" — accepted as a
+    // normal (if useless) filename. Only the literal . / .. /
+    // traversal cases are zip-slip-able, which is what we care about.
     expect(sanitiseFileName("/")).toBe("_")
     expect(sanitiseFileName("\\")).toBe("_")
   })
