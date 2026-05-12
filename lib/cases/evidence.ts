@@ -66,8 +66,35 @@ export class EvidenceError extends Error {
   }
 }
 
-const trimFilename = (name: string) =>
-  name.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 200)
+/**
+ * Canonical filename sanitiser. Returns null when the input is empty,
+ * `.`, `..`, or contains `..` after sanitisation — those names are
+ * either zero-information or zip-slip-able and must be rejected by
+ * every caller. Upload path treats null as FILENAME_REQUIRED; the ZIP
+ * route treats it as "fall back to a synthetic id-prefixed name so the
+ * file still lands in the bundle".
+ *
+ * Rules:
+ *   - replace any char outside [A-Za-z0-9._-] with `_`
+ *   - strip leading dots (hidden-file names some extractors treat specially)
+ *   - clamp to 200 chars
+ *   - reject empty / "." / ".." / contains ".."
+ */
+export const sanitiseFileName = (name: string): string | null => {
+  const cleaned = name
+    .replace(/[^A-Za-z0-9._-]/g, "_")
+    .replace(/^\.+/, "")
+    .slice(0, 200)
+  if (
+    cleaned.length === 0 ||
+    cleaned === "." ||
+    cleaned === ".." ||
+    cleaned.includes("..")
+  ) {
+    return null
+  }
+  return cleaned
+}
 
 // Sanitise an uploader-supplied folder label. Allowed character set is
 // filename-safe ASCII; we deliberately reject:
@@ -108,7 +135,7 @@ export async function uploadEvidence(
   if (!EVIDENCE_ALLOWED_MIME.has(input.mimeType)) {
     throw new EvidenceError("MIME_NOT_ALLOWED")
   }
-  const fileName = trimFilename(input.fileName)
+  const fileName = sanitiseFileName(input.fileName)
   if (!fileName) throw new EvidenceError("FILENAME_REQUIRED")
   const groupName = sanitiseGroupName(input.groupName)
 

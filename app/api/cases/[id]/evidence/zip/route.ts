@@ -2,6 +2,7 @@ import JSZip from "jszip"
 import {
   fetchEvidenceContentByIds,
   listEvidenceForViewer,
+  sanitiseFileName,
   sanitiseGroupName,
 } from "@/lib/cases/evidence"
 import { getSession } from "@/lib/auth/session"
@@ -32,11 +33,18 @@ export async function GET(
 ) {
   const { id } = await params
   const session = await getSession()
+  // Short-circuit anonymous callers — listEvidenceForViewer hits the
+  // case + evidence rows before checking viewer, so without this every
+  // unauthenticated request to a public URL would scan the evidence
+  // table. Same visible behaviour either way (empty → 404), but cheap.
+  if (!session.address) {
+    return new Response("No evidence visible", { status: 404 })
+  }
   // Two-pass: pull metadata-only summaries first and enforce the
   // count/byte caps BEFORE touching the content bytea. A pathological
   // case with hundreds of MB of attachments would otherwise OOM the
   // serverless runtime trying to load every blob just to return 413.
-  const summaries = await listEvidenceForViewer(id, session.address ?? null)
+  const summaries = await listEvidenceForViewer(id, session.address)
   if (summaries.length === 0) {
     return new Response("No evidence visible", { status: 404 })
   }
@@ -67,32 +75,18 @@ export async function GET(
   // same sanitiser at write time so the bundle is independently safe.
   const safeFolder = (raw: string | null): string =>
     sanitiseGroupName(raw) ?? "uncategorised"
-  // Same defense for the file portion of the ZIP entry. The upload path
-  // already normalises through trimFilename, but a tampered row could
+  // Same defense for the file portion of the ZIP entry. The upload
+  // path already runs sanitiseFileName, but a tampered row could
   // smuggle "..", ".", or path separators — any of which would let an
-  // extractor produce an entry like `documents/../foo` that escapes the
-  // extraction root. We reject those names outright and fall back to a
-  // synthetic id-prefixed name so the file still lands in the bundle.
-  const safeFile = (raw: string, id: string): string => {
-    const cleaned = raw
-      .replace(/[^A-Za-z0-9._-]/g, "_")
-      .replace(/^\.+/, "")
-      .slice(0, 200)
-    if (
-      cleaned.length === 0 ||
-      cleaned === "." ||
-      cleaned === ".." ||
-      cleaned.includes("..")
-    ) {
-      return `file-${id.slice(0, 8)}`
-    }
-    return cleaned
-  }
+  // extractor produce an entry like `documents/../foo` that escapes
+  // the extraction root. Re-run the same sanitiser at write time; on
+  // rejection, fall back to a synthetic id-prefixed name so the file
+  // still lands in the bundle.
   const manifest = summaries.flatMap((it) => {
     const content = contentById.get(it.id)
     if (!content) return []
     const folder = safeFolder(it.groupName)
-    const baseName = safeFile(it.fileName, it.id)
+    const baseName = sanitiseFileName(it.fileName) ?? `file-${it.id.slice(0, 8)}`
     // De-dupe colliding filenames within the same folder. First try the
     // sanitised base, then prepend a growing slice of the row's UUID until
     // unique — handles the pathological case where another uploader's
