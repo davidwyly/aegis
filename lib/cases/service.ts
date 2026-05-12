@@ -2,9 +2,9 @@ import "server-only"
 import { eq, and, desc, lt, or, sql, inArray } from "drizzle-orm"
 import { db, schema } from "@/lib/db/client"
 import {
-  isTerminalCaseStatus,
+  isResolvedCaseStatus,
   type CaseStatus,
-  type TerminalCaseStatus,
+  type ResolvedCaseStatus,
 } from "@/lib/db/schema"
 import { z } from "zod"
 
@@ -150,7 +150,7 @@ export async function recordCaseOpened(snap: OnchainCaseSnapshot): Promise<{
  */
 export async function recordResolution(opts: {
   caseUuid: string
-  status: TerminalCaseStatus
+  status: ResolvedCaseStatus
   medianPercentage: number
   finalDigest: `0x${string}`
   resolutionTxHash: `0x${string}`
@@ -527,7 +527,7 @@ export async function listBriefsForViewer(
   if (!caseRow) return []
   const isParty =
     v === caseRow.partyA.toLowerCase() || v === caseRow.partyB.toLowerCase()
-  const isResolved = isTerminalCaseStatus(caseRow.status)
+  const isResolved = isResolvedCaseStatus(caseRow.status)
 
   if (isParty && !isResolved) {
     return all.filter((b) => b.authorAddress.toLowerCase() === v)

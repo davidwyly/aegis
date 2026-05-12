@@ -1,7 +1,7 @@
 import "server-only"
 import { eq } from "drizzle-orm"
 import { db, schema } from "@/lib/db/client"
-import { isTerminalCaseStatus } from "@/lib/db/schema"
+import { isResolvedCaseStatus } from "@/lib/db/schema"
 
 export type TimelineEventKind =
   | "case_opened"
@@ -78,7 +78,7 @@ export async function assembleTimeline(
   const panelRows = await db.query.panelMembers.findMany({
     where: eq(schema.panelMembers.caseUuid, caseUuid),
   })
-  const isResolved = isTerminalCaseStatus(c.status)
+  const isResolved = isResolvedCaseStatus(c.status)
 
   // D13 soft anonymity — public observers see panel timing events
   // (seat positions, timestamps) but NOT the panelist addresses while
