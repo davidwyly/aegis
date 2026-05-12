@@ -36,3 +36,45 @@ export type ResolvedCaseStatus = (typeof RESOLVED_CASE_STATUSES)[number]
 export function isResolvedCaseStatus(s: string): s is ResolvedCaseStatus {
   return (RESOLVED_CASE_STATUSES as readonly string[]).includes(s)
 }
+
+// De novo blindness: an assigned arbiter must not be able to tell
+// whether the case they're sitting on is in the original or appeal
+// phase. The contract emits phase-agnostic events; the off-chain
+// status enum still carries the distinction (DB migration TBD), so
+// any surface that flows status to an arbiter MUST collapse the
+// appeal_* values to their base equivalents first.
+//
+// `LeakingAppealStatus` is derived from the `CaseStatus` union via
+// template-literal extraction, NOT from the map's keys, so any new
+// `appeal_*` value added to the schema enum is automatically caught
+// at the type level — and the `Record<LeakingAppealStatus, …>` typing
+// on the map then forces a compile error here until the maintainer
+// adds an explicit base-status mapping.
+//
+// `appealable_resolved` is intentionally NOT a leaking status — its
+// prefix is `appealable_`, which the template literal does not match.
+// It tells the original arbiter their verdict has been rendered,
+// information they already had by virtue of having revealed.
+type LeakingAppealStatus = Extract<CaseStatus, `appeal_${string}`>
+
+// A `CaseStatus` minus the appeal_* variants — the privacy invariant
+// expressed in the type system. Functions and shapes that flow to
+// arbiters should use this type rather than the raw `CaseStatus`, so
+// the compiler refuses to assign a leaking value in the first place.
+export type ArbiterSafeCaseStatus = Exclude<CaseStatus, LeakingAppealStatus>
+
+const APPEAL_STATUS_MAP: Record<LeakingAppealStatus, ArbiterSafeCaseStatus> = {
+  appeal_awaiting_panel: "awaiting_panel",
+  appeal_open: "open",
+  appeal_revealing: "revealing",
+}
+
+function isLeakingAppealStatus(s: CaseStatus): s is LeakingAppealStatus {
+  return s in APPEAL_STATUS_MAP
+}
+
+export function sanitizeStatusForArbiter(
+  status: CaseStatus,
+): ArbiterSafeCaseStatus {
+  return isLeakingAppealStatus(status) ? APPEAL_STATUS_MAP[status] : status
+}
