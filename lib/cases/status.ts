@@ -74,9 +74,16 @@ function isLeakingAppealStatus(s: CaseStatus): s is LeakingAppealStatus {
 }
 
 export function isArbiterSafeCaseStatus(s: string): s is ArbiterSafeCaseStatus {
+  // Defense-in-depth: reject by the `appeal_` prefix rather than by
+  // map membership. The type system already enforces that
+  // APPEAL_STATUS_MAP covers every `appeal_*` value via
+  // `Record<LeakingAppealStatus, …>`, so the two checks are
+  // equivalent at compile time — but the prefix check matches the
+  // semantic name of the leak and won't drift if the map is ever
+  // temporarily incomplete during refactoring.
   return (
     (CASE_STATUSES as readonly string[]).includes(s) &&
-    !(s in APPEAL_STATUS_MAP)
+    !s.startsWith("appeal_")
   )
 }
 

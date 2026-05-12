@@ -53,22 +53,29 @@ export async function GET(req: Request) {
   }
 
   // The filter vocabulary is the arbiter-safe vocabulary — any
-  // `appeal_*` value (and any unknown string) is rejected. The
-  // valid subset is kept; if the caller passed only invalid values
-  // the request still asked to NARROW the result, so honor that
-  // narrowing intent with an empty response rather than silently
-  // returning the unfiltered ledger. Accepted values are expanded
+  // `appeal_*` value (and any unknown string) is rejected. If a
+  // caller passed any invalid value, 400 explicitly rather than
+  // either silently broadening (would defeat the caller's narrowing
+  // intent) or silently narrowing to empty (would surprise a caller
+  // expecting an error on bad input). Accepted values are expanded
   // to every raw `CaseStatus` that sanitizes to them (e.g. `open`
   // → both raw `open` and raw `appeal_open`), so filtering by
   // `?status=open` covers original-phase AND appeal-phase commit
   // cases.
+  const invalidStatuses = statusParam.filter(
+    (s) => !isArbiterSafeCaseStatus(s),
+  )
+  if (invalidStatuses.length > 0) {
+    return NextResponse.json(
+      {
+        error: `invalid status filter(s): ${invalidStatuses.join(", ")}`,
+      },
+      { status: 400 },
+    )
+  }
   const safeStatuses: ArbiterSafeCaseStatus[] = statusParam.filter(
     isArbiterSafeCaseStatus,
   )
-
-  if (statusParam.length > 0 && safeStatuses.length === 0) {
-    return NextResponse.json({ cases: [], nextCursor: null })
-  }
 
   const rawStatuses: CaseStatus[] =
     safeStatuses.length > 0
