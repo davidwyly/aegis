@@ -1,6 +1,8 @@
 import JSZip from "jszip"
 import {
-  listEvidenceWithContentForViewer,
+  fetchEvidenceContentByIds,
+  listEvidenceForViewer,
+  sanitiseFileName,
   sanitiseGroupName,
 } from "@/lib/cases/evidence"
 import { getSession } from "@/lib/auth/session"
@@ -31,23 +33,36 @@ export async function GET(
 ) {
   const { id } = await params
   const session = await getSession()
-  const items = await listEvidenceWithContentForViewer(id, session.address ?? null)
-  if (items.length === 0) {
+  // Two-pass: pull metadata-only summaries (no content bytea) first
+  // and apply caps on the viewer-scoped list. listEvidenceForViewer
+  // returns [] immediately on a null viewer (anonymous callers fall
+  // through to the empty-summaries 404 below), and pushes the
+  // visibility predicate into SQL with an optional cap — we request
+  // MAX_BUNDLE_FILES+1 rows so detecting cap+1 ⇒ 413 works without
+  // materialising a bigger list.
+  const summaries = await listEvidenceForViewer(id, session.address ?? null, {
+    limit: MAX_BUNDLE_FILES + 1,
+  })
+  if (summaries.length === 0) {
     return new Response("No evidence visible", { status: 404 })
   }
-  if (items.length > MAX_BUNDLE_FILES) {
+  if (summaries.length > MAX_BUNDLE_FILES) {
     return new Response(
       `Bundle exceeds the ${MAX_BUNDLE_FILES}-file limit`,
       { status: 413 },
     )
   }
-  const totalBytes = items.reduce((n, it) => n + it.size, 0)
+  const totalBytes = summaries.reduce((n, it) => n + it.size, 0)
   if (totalBytes > MAX_BUNDLE_BYTES) {
     return new Response(
       `Bundle exceeds the ${MAX_BUNDLE_BYTES}-byte limit`,
       { status: 413 },
     )
   }
+  // Caps passed — now pull content in one bulk query.
+  const contentById = await fetchEvidenceContentByIds(
+    summaries.map((s) => s.id),
+  )
 
   const zip = new JSZip()
   const used = new Set<string>()
@@ -58,22 +73,45 @@ export async function GET(
   // same sanitiser at write time so the bundle is independently safe.
   const safeFolder = (raw: string | null): string =>
     sanitiseGroupName(raw) ?? "uncategorised"
-  const manifest = items.map((it) => {
+  // Same defense for the file portion of the ZIP entry. The upload
+  // path already runs sanitiseFileName, but a tampered row could
+  // smuggle "..", ".", or path separators — any of which would let an
+  // extractor produce an entry like `documents/../foo` that escapes
+  // the extraction root. Re-run the same sanitiser at write time; on
+  // rejection, fall back to a synthetic id-prefixed name so the file
+  // still lands in the bundle.
+  // If any id is missing between the metadata pass and the content
+  // pass, fail loudly instead of silently shipping a partial ZIP. The
+  // alternative — flatMap-skip — would 200 with a manifest claiming N
+  // files but only N-1 actual entries, which is impossible for the
+  // client to detect.
+  const missing = summaries
+    .map((s) => s.id)
+    .filter((id) => !contentById.has(id))
+  if (missing.length > 0) {
+    return new Response(
+      `Evidence content missing for ${missing.length} file(s); please retry`,
+      { status: 500 },
+    )
+  }
+  const manifest = summaries.map((it) => {
+    const content = contentById.get(it.id)!
     const folder = safeFolder(it.groupName)
+    const baseName = sanitiseFileName(it.fileName) ?? `file-${it.id.slice(0, 8)}`
     // De-dupe colliding filenames within the same folder. First try the
-    // raw filename, then prepend a growing slice of the row's UUID until
+    // sanitised base, then prepend a growing slice of the row's UUID until
     // unique — handles the pathological case where another uploader's
     // file already happens to match the id-prefixed slug.
-    let entryName = `${folder}/${it.fileName}`
+    let entryName = `${folder}/${baseName}`
     if (used.has(entryName)) {
       let prefixLen = 8
       do {
-        entryName = `${folder}/${it.id.slice(0, prefixLen)}-${it.fileName}`
+        entryName = `${folder}/${it.id.slice(0, prefixLen)}-${baseName}`
         prefixLen += 4
       } while (used.has(entryName) && prefixLen <= it.id.length)
     }
     used.add(entryName)
-    zip.file(entryName, it.content)
+    zip.file(entryName, content)
     return {
       file: entryName,
       role: it.role,
