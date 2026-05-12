@@ -509,7 +509,7 @@ export default async function CaseDetailPage({
                       )}
                     </div>
                     {b.isEncrypted ? (
-                      <EncryptedBriefViewer sealed={b.sealed as any} />
+                      <EncryptedBriefViewer sealed={b.sealed!} />
                     ) : (
                       <pre className="mt-2 whitespace-pre-wrap text-sm">{b.body}</pre>
                     )}

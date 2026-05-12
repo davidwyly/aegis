@@ -2,6 +2,7 @@ import "server-only"
 import { createHash } from "node:crypto"
 import { and, eq, inArray, type SQL } from "drizzle-orm"
 import { db, schema } from "@/lib/db/client"
+import type { SealedKey } from "@/lib/crypto/seal"
 
 export const EVIDENCE_MAX_BYTES = 2 * 1024 * 1024 // 2 MB
 export const EVIDENCE_ALLOWED_MIME = new Set<string>([
@@ -15,13 +16,6 @@ export const EVIDENCE_ALLOWED_MIME = new Set<string>([
   "application/json",
 ])
 
-export interface SealedRecipient {
-  recipientPubkey: string
-  ephemeralPubkey: string
-  nonce: string
-  wrapped: string
-}
-
 export interface UploadEvidenceInput {
   caseUuid: string
   uploaderAddress: `0x${string}`
@@ -33,7 +27,7 @@ export interface UploadEvidenceInput {
   content: Buffer
   /** Encryption metadata. Both fields required if either is present. */
   bodyNonce?: string
-  sealedRecipients?: SealedRecipient[]
+  sealedRecipients?: SealedKey[]
 }
 
 export interface EvidenceListItem {
@@ -49,7 +43,7 @@ export interface EvidenceListItem {
   uploadedAt: Date
   isEncrypted: boolean
   bodyNonce: string | null
-  sealedRecipients: SealedRecipient[] | null
+  sealedRecipients: SealedKey[] | null
 }
 
 export class EvidenceError extends Error {
