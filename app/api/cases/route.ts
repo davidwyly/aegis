@@ -26,6 +26,16 @@ export async function GET(req: Request) {
   const safeStatuses: ArbiterSafeCaseStatus[] = statusParam.filter(
     isArbiterSafeCaseStatus,
   )
+
+  // The caller asked to filter by status but every value they passed
+  // was rejected (e.g. only `appeal_*`). Returning the unfiltered
+  // ledger would be a surprising behaviour change — the request was
+  // narrowing, not broadening. Honor the narrow intent with an empty
+  // result instead of pretending the filter wasn't there.
+  if (statusParam.length > 0 && safeStatuses.length === 0) {
+    return NextResponse.json({ cases: [], nextCursor: null })
+  }
+
   const rawStatuses: CaseStatus[] =
     safeStatuses.length > 0
       ? Array.from(
