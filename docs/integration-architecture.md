@@ -194,9 +194,22 @@ These are properties no single repo can verify on its own:
    was registered against.
 4. **Fee plumbing**: Vaultra pays the 2.5%–5% arbiter cut to the
    adapter on resolve; the adapter forwards to Aegis in the same call;
-   Aegis credits 80% to revealing panelists and 20% to treasury. If
-   any of those steps stops forwarding, Aegis's `feesDistributed`
-   accounting breaks silently — there's no out-of-band reconciliation.
+   Aegis splits the pot per `_settleNoAppeal` / `_settleAppeal` in
+   `blockchain/contracts/Aegis.sol`. As implemented today:
+   - **No-appeal path**: 50% to the original arbiter, 50% rebated to
+     the parties pro-rata by verdict percentage.
+   - **Appeal path**: each revealing arbiter receives
+     `policy.perArbiterFeeBps` of `c.amount` (or an equal share of the
+     pot when it can't satisfy the target); if no appeal arbiter
+     revealed, the appellant's appeal bond is refunded; remainder
+     rebated to the parties pro-rata by the final verdict.
+   - **Treasury** receives `0` from `FeesAccrued` today — the
+     contract emits the slot but the implementation pays no treasury
+     cut on resolve. Slashed bonds (from missed reveals) are the only
+     path that currently funds the treasury.
+
+   If any forwarding step stops, the on-chain `getCase().feesDistributed`
+   flag won't flip — there's no out-of-band reconciliation.
 
 **When you touch `vaultra/blockchain/contracts/VaultraEscrow.sol`:**
 
@@ -219,7 +232,7 @@ Vaultra-routed" event from Aegis. To audit operational health:
 | `/admin` indexer cursor | Lag per `(contract, eventName)`. Bridge cursor is `(vaultra, "DisputeRaised")`. |
 | `/admin/failures` | Disputes the keeper couldn't bridge, with reason + attempt count. Cleared automatically once `openDispute` lands. |
 | `cases.escrow_address` | Adapter the case was opened against — distinguishes pre/post-rotation cases without a separate column. |
-| `cases.fees_distributed` | Whether the post-`applyArbitration` fee split has been recorded for the case. |
+| `getCase(...).feesDistributed` (on-chain) | Whether the post-`applyArbitration` fee split has run. The DB doesn't mirror this flag — `cases.resolved_at` is the DB-side proxy for "case has fully settled." |
 | VRF subscription LINK balance | Out-of-LINK ⇒ `openDispute` reverts; admin shows a "VRF stuck" count for cases in `awaiting_panel` > 1h. |
 
 For a specific case, the route from Vaultra → Aegis is fully derivable:
