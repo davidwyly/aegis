@@ -23,6 +23,7 @@ import { AppealButton } from "@/components/appeal-button"
 import { getChainData } from "@/lib/chains"
 import { EncryptedBriefViewer } from "@/components/encrypted-brief-viewer"
 import { BriefDownloadButton } from "@/components/brief-download-button"
+import { listEvidenceForViewer } from "@/lib/cases/evidence"
 import { getExplorerAddressUrl } from "@/lib/chains"
 
 // Always server-render — the case state, panel, and brief visibility
@@ -201,6 +202,11 @@ export default async function CaseDetailPage({
     (viewer.toLowerCase() === c.partyA.toLowerCase() ||
       viewer.toLowerCase() === c.partyB.toLowerCase())
   const briefs = await listBriefsForViewer(c.id, viewer)
+  // Evidence count drives the "Download all (ZIP)" link gate — the ZIP
+  // route 404s on an empty case, so we don't want a dead CTA. We fetch
+  // the summary list (no file content) for the count only; EvidencePanel
+  // still does its own client-side fetch for the live render.
+  const evidenceCount = (await listEvidenceForViewer(c.id, viewer)).length
   const isResolved = c.status === "resolved" || c.status === "default_resolved"
   // D13 soft anonymity — public observers must not see assigned
   // arbiter identities while the case is in flight (would enable
@@ -409,12 +415,14 @@ export default async function CaseDetailPage({
             <h2 className="text-sm font-medium uppercase tracking-wide text-zinc-500">
               Evidence
             </h2>
-            <a
-              href={`/api/cases/${c.id}/evidence/zip`}
-              className="btn-secondary text-xs"
-            >
-              Download all (ZIP)
-            </a>
+            {evidenceCount > 0 && (
+              <a
+                href={`/api/cases/${c.id}/evidence/zip`}
+                className="btn-secondary text-xs"
+              >
+                Download all (ZIP)
+              </a>
+            )}
           </div>
           <p className="mt-1 text-xs text-zinc-500">
             Visibility tracks the brief: parties see their own uploads,

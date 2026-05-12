@@ -80,7 +80,12 @@ const trimFilename = (name: string) =>
 // On rejection we collapse to null (uncategorised) rather than erroring,
 // since the upload itself is valid; only the requested folder label is
 // dropped.
-const trimGroupName = (name: string | null | undefined): string | null => {
+//
+// Exported so the ZIP route can re-apply the same sanitisation at write
+// time as defense-in-depth against stale/hand-crafted rows.
+export const sanitiseGroupName = (
+  name: string | null | undefined,
+): string | null => {
   if (!name) return null
   const trimmed = name.trim()
   if (trimmed.length === 0) return null
@@ -105,7 +110,7 @@ export async function uploadEvidence(
   }
   const fileName = trimFilename(input.fileName)
   if (!fileName) throw new EvidenceError("FILENAME_REQUIRED")
-  const groupName = trimGroupName(input.groupName)
+  const groupName = sanitiseGroupName(input.groupName)
 
   const caseRow = await db.query.cases.findFirst({
     where: eq(schema.cases.id, input.caseUuid),
@@ -262,6 +267,11 @@ export async function listEvidenceWithContentForViewer(
   caseUuid: string,
   viewer: `0x${string}` | null,
 ): Promise<EvidenceWithContent[]> {
+  // Short-circuit the visibility gating + the bulk content fetch for
+  // anonymous callers. listEvidenceForViewer would also return []
+  // eventually, but only after running the case + panel lookups; bailing
+  // here saves two DB roundtrips on every public-visitor request.
+  if (!viewer) return []
   const summaries = await listEvidenceForViewer(caseUuid, viewer)
   if (summaries.length === 0) return []
   const ids = summaries.map((s) => s.id)
