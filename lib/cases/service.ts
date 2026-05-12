@@ -438,6 +438,11 @@ export async function listBriefVersions(briefId: string) {
  * Bulk variant — fetch versions for many briefs in a single query and
  * group by briefId. Callers that render N briefs would otherwise issue
  * N round-trips through listBriefVersions.
+ *
+ * Caller should only invoke this when they actually need body content
+ * (i.e. post-resolution view). For pre-resolution count-only paths use
+ * listBriefVersionCountsByBriefIds to avoid fetching N kilobytes of
+ * body per row just to call .length.
  */
 export async function listBriefVersionsByBriefIds(
   briefIds: string[],
@@ -448,14 +453,40 @@ export async function listBriefVersionsByBriefIds(
   >()
   for (const id of briefIds) grouped.set(id, [])
   if (briefIds.length === 0) return grouped
+  // Order by (briefId, version) so Postgres can satisfy the sort with
+  // the existing brief_versions_uniq_idx composite index instead of a
+  // global sort on `version` alone.
   const rows = await db.query.briefVersions.findMany({
     where: inArray(schema.briefVersions.briefId, briefIds),
-    orderBy: (v, { asc }) => [asc(v.version)],
+    orderBy: (v, { asc }) => [asc(v.briefId), asc(v.version)],
   })
   for (const r of rows) {
     const bucket = grouped.get(r.briefId)
     if (bucket) bucket.push(r)
   }
+  return grouped
+}
+
+/**
+ * Count-only bulk variant — for the pre-resolution path where the
+ * caller wants "edited N times" without paying to pull every prior
+ * body across the wire. One grouped aggregate query.
+ */
+export async function listBriefVersionCountsByBriefIds(
+  briefIds: string[],
+): Promise<Map<string, number>> {
+  const grouped = new Map<string, number>()
+  for (const id of briefIds) grouped.set(id, 0)
+  if (briefIds.length === 0) return grouped
+  const rows = await db
+    .select({
+      briefId: schema.briefVersions.briefId,
+      count: sql<number>`count(*)::int`,
+    })
+    .from(schema.briefVersions)
+    .where(inArray(schema.briefVersions.briefId, briefIds))
+    .groupBy(schema.briefVersions.briefId)
+  for (const r of rows) grouped.set(r.briefId, r.count)
   return grouped
 }
 

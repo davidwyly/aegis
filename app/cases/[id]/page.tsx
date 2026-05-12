@@ -7,7 +7,10 @@ import {
   listBriefsForViewer,
 } from "@/lib/cases/service"
 import { findConflictsForPanel } from "@/lib/arbiters/conflicts"
-import { listBriefVersionsByBriefIds } from "@/lib/cases/service"
+import {
+  listBriefVersionCountsByBriefIds,
+  listBriefVersionsByBriefIds,
+} from "@/lib/cases/service"
 import { getSession } from "@/lib/auth/session"
 import { CaseStatusBadge } from "@/components/case-status-badge"
 import { BriefEditor } from "@/components/brief-editor"
@@ -212,18 +215,24 @@ export default async function CaseDetailPage({
     c.status === "appealable_resolved" ||
     c.status === "appeal_awaiting_panel"
   // Edit history for each brief — one bulk query for all briefs on the
-  // page (was N+1: two findMany calls per brief × N briefs). Bodies are
-  // only surfaced post-resolution; pre-resolution we keep the count so
-  // observers can see "edited N times" without seeing prior content.
-  const versionsByBriefId = await listBriefVersionsByBriefIds(
-    briefs.map((b) => b.id),
-  )
+  // page (was N+1: two findMany calls per brief × N briefs). Pre-resolution
+  // we only need counts ("edited N times"); fetch via a grouped COUNT so
+  // we don't pay to pull every prior body just to call .length. Bodies
+  // only come across the wire post-resolution.
+  const briefIds = briefs.map((b) => b.id)
+  const versionsByBriefId = isResolved
+    ? await listBriefVersionsByBriefIds(briefIds)
+    : null
+  const countsByBriefId =
+    versionsByBriefId === null
+      ? await listBriefVersionCountsByBriefIds(briefIds)
+      : null
   const briefHistories = briefs.map((b) => ({
     briefId: b.id,
-    versions: isResolved ? (versionsByBriefId.get(b.id) ?? []) : [],
+    versions: versionsByBriefId?.get(b.id) ?? [],
   }))
   const editCounts = briefs.map((b) =>
-    isResolved ? null : (versionsByBriefId.get(b.id)?.length ?? 0),
+    isResolved ? null : (countsByBriefId?.get(b.id) ?? 0),
   )
   const timeline = await assembleTimeline(c.id, {
     includePrivate: isParty || isPanelist,
