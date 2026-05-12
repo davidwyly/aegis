@@ -356,6 +356,12 @@ export const evidenceFiles = pgTable(
     uploaderAddress: text("uploader_address").notNull(),
     role: text("role").notNull(), // 'partyA' | 'partyB'
     fileName: text("file_name").notNull(),
+    // Group/folder label chosen by the uploader so multi-file submissions
+    // can be organised (e.g. "documents", "media", "exhibits"). Null/empty
+    // renders as the "uncategorised" bucket in both the UI and ZIP
+    // bundle. Server sanitises to filename-safe characters [A-Za-z0-9._-]
+    // and clamps to 64 chars (see trimGroupName in lib/cases/evidence.ts).
+    groupName: text("group_name"),
     mimeType: text("mime_type").notNull(),
     size: integer("size").notNull(),
     // sha256 of whatever is stored in `content` — i.e. the plaintext

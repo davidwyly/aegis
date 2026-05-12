@@ -112,12 +112,28 @@ test.describe("arbiter happy path", () => {
 })
 
 /**
- * Force the cases.deadline_commit row backwards in time so the case page's
- * server-side phase computation flips from "commit" to "reveal". The
- * contract on its own accepts the reveal because we already advanced
- * EVM time; this keeps the UI's view of the deadline aligned. The keeper
- * doesn't update DB deadlines for time-only transitions (no event), so
- * tests have to nudge it directly.
+ * Test-only fixture: rewrite the cases.deadline_commit row to a past
+ * timestamp so the case page's phase computation flips from "commit" to
+ * "reveal" and we can find the Reveal button.
+ *
+ * This is NOT a mock-as-oracle, even though it mutates production-shape
+ * data. The chain of trust is:
+ *   - contract: real (real evm_increaseTime moves block.timestamp past
+ *     the commit window, contract accepts reveal on its own merits)
+ *   - keeper: real (after reveal, tickKeeper picks up the Revealed event
+ *     and writes cases.status = appealable_resolved from getCase())
+ *   - final assertion: real ("Appeal window" badge reads cases.status,
+ *     which came from chain state via the real keeper)
+ *
+ * The nudge only paints over a fundamental wall-clock-vs-EVM-time
+ * divergence that exists in tests but not production: the case page
+ * compares stored DB timestamps (wall-clock when the keeper wrote them)
+ * to `Date.now()` (wall-clock), so `evm_increaseTime` doesn't flip the
+ * UI's phase. In production, real wall-clock advances both halves of
+ * the comparison together and no nudge is needed.
+ *
+ * If the case page ever starts deriving phase from a chain `getCase()`
+ * read, this nudge becomes dead code — delete it then.
  */
 async function advanceCommitWindowInDb(
   databaseUrl: string,

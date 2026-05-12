@@ -1,6 +1,6 @@
 import "server-only"
 import { createHash } from "node:crypto"
-import { eq, and, inArray } from "drizzle-orm"
+import { eq, inArray } from "drizzle-orm"
 import { db, schema } from "@/lib/db/client"
 
 export const EVIDENCE_MAX_BYTES = 2 * 1024 * 1024 // 2 MB
@@ -27,6 +27,8 @@ export interface UploadEvidenceInput {
   uploaderAddress: `0x${string}`
   fileName: string
   mimeType: string
+  /** Optional folder/group label so the UI and ZIP bundle can nest by topic. */
+  groupName?: string | null
   /** Body bytes — plaintext when not encrypted, AES-GCM ciphertext when encrypted. */
   content: Buffer
   /** Encryption metadata. Both fields required if either is present. */
@@ -40,6 +42,7 @@ export interface EvidenceListItem {
   uploaderAddress: string
   role: "partyA" | "partyB"
   fileName: string
+  groupName: string | null
   mimeType: string
   size: number
   sha256: string
@@ -66,6 +69,35 @@ export class EvidenceError extends Error {
 const trimFilename = (name: string) =>
   name.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 200)
 
+// Sanitise an uploader-supplied folder label. Allowed character set is
+// filename-safe ASCII; we deliberately reject:
+//   - the literal ".", ".."   — these as ZIP directory names create
+//     entries like `../foo` that escape the extraction root (zip slip)
+//   - any name *containing* ".." — same risk if the consumer's
+//     extractor doesn't normalise path segments
+//   - leading dots — produce hidden directories that some extractors
+//     treat specially
+// On rejection we collapse to null (uncategorised) rather than erroring,
+// since the upload itself is valid; only the requested folder label is
+// dropped.
+//
+// Exported so the ZIP route can re-apply the same sanitisation at write
+// time as defense-in-depth against stale/hand-crafted rows.
+export const sanitiseGroupName = (
+  name: string | null | undefined,
+): string | null => {
+  if (!name) return null
+  const trimmed = name.trim()
+  if (trimmed.length === 0) return null
+  const cleaned = trimmed
+    .replace(/[^A-Za-z0-9._-]/g, "_")
+    .replace(/^\.+/, "")
+    .slice(0, 64)
+  if (cleaned.length === 0) return null
+  if (cleaned === "." || cleaned === ".." || cleaned.includes("..")) return null
+  return cleaned
+}
+
 export async function uploadEvidence(
   input: UploadEvidenceInput,
 ): Promise<EvidenceListItem> {
@@ -78,6 +110,7 @@ export async function uploadEvidence(
   }
   const fileName = trimFilename(input.fileName)
   if (!fileName) throw new EvidenceError("FILENAME_REQUIRED")
+  const groupName = sanitiseGroupName(input.groupName)
 
   const caseRow = await db.query.cases.findFirst({
     where: eq(schema.cases.id, input.caseUuid),
@@ -105,6 +138,7 @@ export async function uploadEvidence(
       uploaderAddress: uploader,
       role,
       fileName,
+      groupName,
       mimeType: input.mimeType,
       size: input.content.length,
       sha256,
@@ -124,6 +158,7 @@ export async function uploadEvidence(
     uploaderAddress: uploader,
     role,
     fileName,
+    groupName,
     mimeType: input.mimeType,
     size: input.content.length,
     sha256,
@@ -157,6 +192,7 @@ export async function listEvidenceForViewer(
       uploaderAddress: schema.evidenceFiles.uploaderAddress,
       role: schema.evidenceFiles.role,
       fileName: schema.evidenceFiles.fileName,
+      groupName: schema.evidenceFiles.groupName,
       mimeType: schema.evidenceFiles.mimeType,
       size: schema.evidenceFiles.size,
       sha256: schema.evidenceFiles.sha256,
@@ -218,5 +254,37 @@ export async function downloadEvidence(
   }
 }
 
-void inArray // reserved for future bulk fetches
-void and
+export interface EvidenceWithContent extends EvidenceListItem {
+  content: Buffer
+}
+
+/**
+ * Bulk fetch for the ZIP-bundle endpoint. Visibility gating runs through
+ * listEvidenceForViewer; we then pull the content bytes in a single query
+ * keyed by the visible ids.
+ */
+export async function listEvidenceWithContentForViewer(
+  caseUuid: string,
+  viewer: `0x${string}` | null,
+): Promise<EvidenceWithContent[]> {
+  // Short-circuit the visibility gating + the bulk content fetch for
+  // anonymous callers. listEvidenceForViewer would also return []
+  // eventually, but only after running the case + panel lookups; bailing
+  // here saves two DB roundtrips on every public-visitor request.
+  if (!viewer) return []
+  const summaries = await listEvidenceForViewer(caseUuid, viewer)
+  if (summaries.length === 0) return []
+  const ids = summaries.map((s) => s.id)
+  const rows = await db
+    .select({
+      id: schema.evidenceFiles.id,
+      content: schema.evidenceFiles.content,
+    })
+    .from(schema.evidenceFiles)
+    .where(inArray(schema.evidenceFiles.id, ids))
+  const byId = new Map(rows.map((r) => [r.id, r.content]))
+  return summaries.flatMap((s) => {
+    const content = byId.get(s.id)
+    return content ? [{ ...s, content }] : []
+  })
+}

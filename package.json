@@ -32,6 +32,7 @@
     "@wagmi/core": "^2.13.5",
     "drizzle-orm": "^0.45.2",
     "iron-session": "^8.0.4",
+    "jszip": "^3.10.1",
     "next": "14.2.16",
     "postgres": "^3.4.9",
     "react": "^19",

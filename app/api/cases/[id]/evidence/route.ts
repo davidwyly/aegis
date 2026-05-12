@@ -65,6 +65,7 @@ export async function POST(
     const sealedJson = form.get("sealedRecipients")
     const fileNameField = form.get("fileName")
     const mimeTypeField = form.get("mimeType")
+    const groupNameField = form.get("groupName")
 
     const item = await uploadEvidence({
       caseUuid: id,
@@ -77,6 +78,10 @@ export async function POST(
         typeof mimeTypeField === "string" && mimeTypeField
           ? mimeTypeField
           : (file as File).type,
+      groupName:
+        typeof groupNameField === "string" && groupNameField
+          ? groupNameField
+          : null,
       content: Buffer.from(arrayBuf),
       bodyNonce:
         typeof bodyNonce === "string" && bodyNonce ? bodyNonce : undefined,
