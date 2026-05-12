@@ -49,8 +49,11 @@ Four behavioral invariants the escrow side must hold:
    address registered as arbiter on the protocol side, which for the
    Aegis case is either the Aegis contract or an adapter sitting in
    front of it.
-4. **`partyA` / `partyB`** are distinct addresses. Aegis excludes both
-   from the eligible-panelist pool.
+4. **`partyA` / `partyB`** are both non-zero. Aegis enforces non-zero
+   in `openDispute` but does *not* check `partyA != partyB`; passing
+   the same address for both is a misuse, not a revert — the
+   panel-exclusion and pair-key logic still terminates, but the case
+   is shaped degenerately.
 
 ---
 
@@ -178,10 +181,11 @@ These are properties no single repo can verify on its own:
 1. **`computeAegisCaseId` (Vaultra)** must produce the same bytes as
    **`VaultraAdapter._packCaseId` (Aegis)**. Checked in tests on both
    sides; only enforced by code review on the pairing.
-2. **`integration-fixtures/VaultraEscrow.sol` (Aegis)** must stay
-   identical to **`blockchain/contracts/VaultraEscrow.sol` (Vaultra)**
-   except for the 5-line vendoring header. The Aegis fork-integration
-   test (`AegisVaultraForkIntegration`) is the regression net.
+2. **`blockchain/contracts/integration-fixtures/VaultraEscrow.sol`
+   (Aegis)** must stay identical to
+   **`blockchain/contracts/VaultraEscrow.sol` (Vaultra)** except for
+   the 5-line vendoring header. The Aegis fork-integration test
+   (`AegisVaultraForkIntegration`) is the regression net.
 3. **Vaultra's `eclipseDAO` slot** is what gets pointed at the deployed
    adapter (`vaultra.updateEclipseDAO(adapter)`). New Vaultra escrows
    pick up `arbiter = adapter` from that slot; existing escrows keep
