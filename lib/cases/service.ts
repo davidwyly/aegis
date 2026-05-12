@@ -322,10 +322,11 @@ export const briefBodySchema = z
 
 // Branded hex parser — proves the `0x...` shape at runtime, and brands
 // the output so the DB column type (`0x${string}`) is satisfied without
-// downstream casts.
+// downstream casts. Requires an even number of hex digits so the bytes
+// round-trip through `hexToBytes` without failing later.
 const hex = z
   .string()
-  .regex(/^0x[a-fA-F0-9]+$/)
+  .regex(/^0x([a-fA-F0-9]{2})+$/)
   .transform((s) => s as `0x${string}`)
 const hex64 = z
   .string()
