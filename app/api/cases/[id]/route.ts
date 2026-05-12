@@ -8,7 +8,6 @@ import { getSession } from "@/lib/auth/session"
 import {
   isResolvedCaseStatus,
   sanitizeStatusForArbiter,
-  type CaseStatus,
 } from "@/lib/cases/status"
 
 export async function GET(
@@ -34,10 +33,11 @@ export async function GET(
   // shape. The contract excludes parties from being drawn, so the
   // party branch is never reached by an assigned arbiter on the
   // same case.
+  const viewerLower = viewer?.toLowerCase() ?? null
   const isParty =
-    viewer !== null &&
-    (viewer.toLowerCase() === caseRow.partyA.toLowerCase() ||
-      viewer.toLowerCase() === caseRow.partyB.toLowerCase())
+    viewerLower !== null &&
+    (viewerLower === caseRow.partyA.toLowerCase() ||
+      viewerLower === caseRow.partyB.toLowerCase())
   const isResolved = isResolvedCaseStatus(caseRow.status)
   const showRaw = isParty || isResolved
 
@@ -45,7 +45,7 @@ export async function GET(
     ? caseRow
     : {
         ...caseRow,
-        status: sanitizeStatusForArbiter(caseRow.status as CaseStatus),
+        status: sanitizeStatusForArbiter(caseRow.status),
       }
 
   const panel = showRaw ? await getPanel(caseRow.id) : []
