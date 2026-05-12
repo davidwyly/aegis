@@ -10,47 +10,62 @@ import {
   type CaseStatus,
 } from "@/lib/cases/status"
 
-// Parse a query-param string as a positive integer. Returns
-// `undefined` for a missing param so the caller falls through to
-// listLedger's default; returns `null` for an invalid one so the
-// caller can 400 explicitly rather than letting NaN propagate into
-// the SQL layer.
-function parsePositiveInt(raw: string | null): number | null | undefined {
+// Postgres `integer` is signed 32-bit. The `cases.chain_id` column
+// uses that type, so larger values would pass a basic positive-int
+// check and then 500 in the SQL layer.
+const MAX_INT32 = 2_147_483_647
+
+// Parse a query-param string as a positive integer bounded above by
+// `max`. Returns `undefined` for a missing param so the caller falls
+// through to listLedger's default; returns `null` for invalid input
+// so the caller can 400 explicitly rather than letting NaN / overflow
+// propagate into the SQL layer.
+function parsePositiveInt(
+  raw: string | null,
+  max: number,
+): number | null | undefined {
   if (raw === null) return undefined
   if (!/^\d+$/.test(raw)) return null
   const n = Number(raw)
-  return Number.isFinite(n) && n > 0 ? n : null
+  return Number.isFinite(n) && n > 0 && n <= max ? n : null
 }
 
 export async function GET(req: Request) {
   const url = new URL(req.url)
-  const chainId = parsePositiveInt(url.searchParams.get("chainId"))
-  const limit = parsePositiveInt(url.searchParams.get("limit"))
+  const chainId = parsePositiveInt(url.searchParams.get("chainId"), MAX_INT32)
+  // listLedger clamps limit to MAX_LIMIT internally, but reject
+  // out-of-range numbers up front so the error is honest.
+  const limit = parsePositiveInt(url.searchParams.get("limit"), 1_000)
   const cursor = url.searchParams.get("cursor")
   const statusParam = url.searchParams.getAll("status")
 
-  if (chainId === null || limit === null) {
+  if (chainId === null) {
     return NextResponse.json(
-      { error: "chainId and limit must be positive integers" },
+      { error: "chainId must be a positive integer ≤ 2147483647" },
+      { status: 400 },
+    )
+  }
+  if (limit === null) {
+    return NextResponse.json(
+      { error: "limit must be a positive integer ≤ 1000" },
       { status: 400 },
     )
   }
 
   // The filter vocabulary is the arbiter-safe vocabulary — any
-  // `appeal_*` value passed by the caller is silently dropped, not
-  // honored. We then expand each accepted filter status to every
-  // raw `CaseStatus` that sanitizes to it (e.g. `open` → both raw
-  // `open` and raw `appeal_open`), so filtering by `?status=open`
-  // covers original-phase AND appeal-phase commit cases.
+  // `appeal_*` value (and any unknown string) is rejected. The
+  // valid subset is kept; if the caller passed only invalid values
+  // the request still asked to NARROW the result, so honor that
+  // narrowing intent with an empty response rather than silently
+  // returning the unfiltered ledger. Accepted values are expanded
+  // to every raw `CaseStatus` that sanitizes to them (e.g. `open`
+  // → both raw `open` and raw `appeal_open`), so filtering by
+  // `?status=open` covers original-phase AND appeal-phase commit
+  // cases.
   const safeStatuses: ArbiterSafeCaseStatus[] = statusParam.filter(
     isArbiterSafeCaseStatus,
   )
 
-  // The caller asked to filter by status but every value they passed
-  // was rejected (e.g. only `appeal_*`). Returning the unfiltered
-  // ledger would be a surprising behaviour change — the request was
-  // narrowing, not broadening. Honor the narrow intent with an empty
-  // result instead of pretending the filter wasn't there.
   if (statusParam.length > 0 && safeStatuses.length === 0) {
     return NextResponse.json({ cases: [], nextCursor: null })
   }
