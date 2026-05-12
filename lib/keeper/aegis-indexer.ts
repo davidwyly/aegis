@@ -117,6 +117,11 @@ export async function indexAegisEvents(
       const decoded = decodeAegisLog(rawLog)
       if (!decoded) continue
 
+      // Only count toward `eventsApplied` when a handler actually
+      // ran. decodeAegisLog can return any event in aegisAbi; the
+      // switch covers a subset, and intentionally-no-op cases
+      // (Stalled, PartyRebated) shouldn't inflate the counter either.
+      let handled = true
       switch (decoded.eventName) {
         case "CaseRequested": {
           await applyCaseRequested(cfg, decoded.args)
@@ -160,16 +165,6 @@ export async function indexAegisEvents(
           await applyStatusUpdate(cfg, decoded.args.caseId, "appeal_awaiting_panel")
           break
         }
-        case "Stalled": {
-          // Same-tx CaseResolved or CaseDefaultResolved sweeps up the
-          // resolution. Nothing extra needed here.
-          break
-        }
-        case "PartyRebated": {
-          // Recorded for indexing; the claim() event from the party
-          // ultimately reflects the actual movement. No status side-effect.
-          break
-        }
         case "ArbiterRegistered": {
           await applyArbiterRegistered(cfg, decoded.args)
           break
@@ -183,8 +178,14 @@ export async function indexAegisEvents(
           await applyStakeChange(cfg, decoded.args)
           break
         }
+        default:
+          // Stalled (sweeps via same-tx CaseResolved/DefaultResolved),
+          // PartyRebated (the claim() event reflects movement), and
+          // anything else in the ABI we don't index yet. Decoded
+          // successfully but not applied.
+          handled = false
       }
-      applied += 1
+      if (handled) applied += 1
     } catch (err) {
       console.warn("[aegis-indexer] failed to apply log:", err)
     }
@@ -337,6 +338,8 @@ async function applyArbiterDrawn(
     } else if (og.panelistAddress.toLowerCase() !== arbiter) {
       // Stall round-0 redraw: original hasn't revealed and a different
       // arbiter is being drawn. Mark the old original as 'redrawn'.
+      // Scope the update to the active row so a replay of this log
+      // doesn't overwrite a leftAt set on the first pass.
       await db
         .update(schema.panelMembers)
         .set({ leftAt: new Date(), leftReason: "redrawn" })
@@ -344,6 +347,7 @@ async function applyArbiterDrawn(
           and(
             eq(schema.panelMembers.caseUuid, caseUuid),
             eq(schema.panelMembers.panelistAddress, og.panelistAddress),
+            sql`${schema.panelMembers.leftAt} IS NULL`,
           ),
         )
     }
@@ -376,9 +380,17 @@ async function applyArbiterRedrawn(
   const previous = args.previousArbiter.toLowerCase()
   const replacement = args.replacement.toLowerCase()
 
+  // Scope the lookup to the active row so a log replay no-ops
+  // instead of overwriting the leftAt timestamp on the already-left
+  // panelist. The matching update below also filters on leftAt
+  // IS NULL for the same reason.
   const prev = await db.query.panelMembers.findFirst({
-    where: (m, { and: a, eq: e }) =>
-      a(e(m.caseUuid, caseUuid), e(m.panelistAddress, previous)),
+    where: (m, { and: a, eq: e, isNull }) =>
+      a(
+        e(m.caseUuid, caseUuid),
+        e(m.panelistAddress, previous),
+        isNull(m.leftAt),
+      ),
     columns: { phase: true, seat: true },
   })
   if (!prev) return
@@ -390,6 +402,7 @@ async function applyArbiterRedrawn(
       and(
         eq(schema.panelMembers.caseUuid, caseUuid),
         eq(schema.panelMembers.panelistAddress, previous),
+        sql`${schema.panelMembers.leftAt} IS NULL`,
       ),
     )
 
@@ -567,12 +580,18 @@ async function applyRecused(
 
   // The Recused event doesn't carry a seat number — it's keyed by
   // (caseId, recused, replacement). Look up the recused panelist's
-  // row to recover the seat (same approach as applyArbiterRedrawn).
-  // Pre-typed-args this read `args.seat`, which was always undefined
-  // and coerced to NaN; new rows were inserted with NaN as their seat.
+  // active row to recover the seat (same approach as
+  // applyArbiterRedrawn). Pre-typed-args this read `args.seat`, which
+  // was always undefined and coerced to NaN; new rows were inserted
+  // with NaN as their seat. The leftAt IS NULL filter makes the
+  // handler a no-op on replay.
   const prev = await db.query.panelMembers.findFirst({
-    where: (m, { and: a, eq: e }) =>
-      a(e(m.caseUuid, caseUuid), e(m.panelistAddress, recused)),
+    where: (m, { and: a, eq: e, isNull }) =>
+      a(
+        e(m.caseUuid, caseUuid),
+        e(m.panelistAddress, recused),
+        isNull(m.leftAt),
+      ),
     columns: { seat: true, phase: true },
   })
   if (!prev) return
@@ -586,6 +605,7 @@ async function applyRecused(
       and(
         eq(schema.panelMembers.caseUuid, caseUuid),
         eq(schema.panelMembers.panelistAddress, recused),
+        sql`${schema.panelMembers.leftAt} IS NULL`,
       ),
     )
   await db
