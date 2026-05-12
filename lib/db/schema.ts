@@ -182,6 +182,13 @@ export const caseStatusEnum = pgEnum("case_status", [
   "default_resolved",
   "stalled",
 ])
+export const CASE_STATUSES = caseStatusEnum.enumValues
+export type CaseStatus = (typeof CASE_STATUSES)[number]
+export const TERMINAL_CASE_STATUSES = ["resolved", "default_resolved"] as const
+export type TerminalCaseStatus = (typeof TERMINAL_CASE_STATUSES)[number]
+export function isTerminalCaseStatus(s: string): s is TerminalCaseStatus {
+  return (TERMINAL_CASE_STATUSES as readonly string[]).includes(s)
+}
 
 export const cases = pgTable(
   "cases",
