@@ -1,7 +1,9 @@
 import { describe, it, expect } from "vitest"
 import {
   CASE_STATUSES,
+  isArbiterSafeCaseStatus,
   isResolvedCaseStatus,
+  rawStatusesMatchingSanitized,
   sanitizeStatusForArbiter,
   type CaseStatus,
 } from "./status"
@@ -71,5 +73,62 @@ describe("isResolvedCaseStatus", () => {
     expect(isResolvedCaseStatus("stalled")).toBe(false)
     expect(isResolvedCaseStatus("appealable_resolved")).toBe(false)
     expect(isResolvedCaseStatus("open")).toBe(false)
+  })
+})
+
+describe("isArbiterSafeCaseStatus", () => {
+  it("rejects appeal_* statuses", () => {
+    expect(isArbiterSafeCaseStatus("appeal_open")).toBe(false)
+    expect(isArbiterSafeCaseStatus("appeal_revealing")).toBe(false)
+    expect(isArbiterSafeCaseStatus("appeal_awaiting_panel")).toBe(false)
+  })
+
+  it("accepts all non-appeal statuses", () => {
+    expect(isArbiterSafeCaseStatus("awaiting_panel")).toBe(true)
+    expect(isArbiterSafeCaseStatus("open")).toBe(true)
+    expect(isArbiterSafeCaseStatus("revealing")).toBe(true)
+    expect(isArbiterSafeCaseStatus("appealable_resolved")).toBe(true)
+    expect(isArbiterSafeCaseStatus("resolved")).toBe(true)
+    expect(isArbiterSafeCaseStatus("default_resolved")).toBe(true)
+    expect(isArbiterSafeCaseStatus("stalled")).toBe(true)
+  })
+
+  it("rejects unknown strings", () => {
+    expect(isArbiterSafeCaseStatus("bogus")).toBe(false)
+    expect(isArbiterSafeCaseStatus("")).toBe(false)
+  })
+})
+
+describe("rawStatusesMatchingSanitized", () => {
+  it("expands `open` to original + appeal commit phases", () => {
+    expect(rawStatusesMatchingSanitized("open").sort()).toEqual(
+      ["appeal_open", "open"].sort(),
+    )
+  })
+
+  it("expands `revealing` and `awaiting_panel` similarly", () => {
+    expect(rawStatusesMatchingSanitized("revealing").sort()).toEqual(
+      ["appeal_revealing", "revealing"].sort(),
+    )
+    expect(rawStatusesMatchingSanitized("awaiting_panel").sort()).toEqual(
+      ["appeal_awaiting_panel", "awaiting_panel"].sort(),
+    )
+  })
+
+  it("returns just the input for non-expanded statuses", () => {
+    expect(rawStatusesMatchingSanitized("resolved")).toEqual(["resolved"])
+    expect(rawStatusesMatchingSanitized("stalled")).toEqual(["stalled"])
+    expect(rawStatusesMatchingSanitized("appealable_resolved")).toEqual([
+      "appealable_resolved",
+    ])
+  })
+
+  it("round-trips with sanitizeStatusForArbiter", () => {
+    // For every raw status that sanitizes to X, X's expansion must
+    // include that raw status. Pins the inverse-map relationship.
+    for (const s of CASE_STATUSES) {
+      const sanitized = sanitizeStatusForArbiter(s)
+      expect(rawStatusesMatchingSanitized(sanitized)).toContain(s)
+    }
   })
 })

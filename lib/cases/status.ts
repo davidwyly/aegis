@@ -73,8 +73,36 @@ function isLeakingAppealStatus(s: CaseStatus): s is LeakingAppealStatus {
   return s in APPEAL_STATUS_MAP
 }
 
+export function isArbiterSafeCaseStatus(s: string): s is ArbiterSafeCaseStatus {
+  return (
+    (CASE_STATUSES as readonly string[]).includes(s) &&
+    !(s in APPEAL_STATUS_MAP)
+  )
+}
+
 export function sanitizeStatusForArbiter(
   status: CaseStatus,
 ): ArbiterSafeCaseStatus {
   return isLeakingAppealStatus(status) ? APPEAL_STATUS_MAP[status] : status
+}
+
+// Inverse of `sanitizeStatusForArbiter` — given an arbiter-safe
+// status, return every raw `CaseStatus` that sanitizes to it. Used
+// by API filter handlers that accept the arbiter-safe vocabulary
+// and need to expand to the raw values for the SQL `IN (...)` clause.
+//
+// `open` → [`open`, `appeal_open`], etc. Drift-safe: derived from
+// `APPEAL_STATUS_MAP`, so adding a new entry there automatically
+// extends the expansion.
+export function rawStatusesMatchingSanitized(
+  s: ArbiterSafeCaseStatus,
+): CaseStatus[] {
+  const matches: CaseStatus[] = [s]
+  for (const [raw, sanitized] of Object.entries(APPEAL_STATUS_MAP) as [
+    LeakingAppealStatus,
+    ArbiterSafeCaseStatus,
+  ][]) {
+    if (sanitized === s) matches.push(raw)
+  }
+  return matches
 }
