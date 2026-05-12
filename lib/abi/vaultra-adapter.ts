@@ -23,6 +23,21 @@ export const vaultraAdapterAbi = [
   },
   {
     "inputs": [],
+    "name": "InvalidMilestoneIndex",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "MilestoneNotDisputed",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "MilestoneShapeMismatch",
+    "type": "error"
+  },
+  {
+    "inputs": [],
     "name": "NotArbiter",
     "type": "error"
   },

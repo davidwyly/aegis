@@ -8,6 +8,7 @@ import {
   VAULTRA_STATUS_DISPUTED,
   VOTE_WINDOW,
   createAndFundEscrow,
+  createAndFundMilestoneEscrow,
   deployIntegrationStack,
   disputeCollateral,
   usdc,
@@ -173,5 +174,78 @@ describe("Aegis ↔ VaultraEscrow integration", () => {
     await expect(
       adapter.connect(client).registerCase(escrowId, 0n, true)
     ).to.be.revertedWithCustomError(adapter, "NotDisputed")
+  })
+
+  it("registerCase rejects a non-disputed milestone on a disputed escrow", async () => {
+    const ctx = await loadFixture(fixture)
+    const { adapter, vaultra, usdcToken, client, worker } = ctx
+
+    // Two-milestone escrow; dispute only milestone 0.
+    const escrowId = await createAndFundMilestoneEscrow(
+      vaultra,
+      usdcToken,
+      client,
+      worker,
+      [usdc("60"), usdc("40")],
+    )
+    await vaultra.connect(worker).raiseDispute(escrowId, 0n)
+    expect((await vaultra.getEscrow(escrowId)).status).to.equal(VAULTRA_STATUS_DISPUTED)
+
+    // Registering milestone 0 succeeds (it really is disputed).
+    await adapter.connect(client).registerCase(escrowId, 0n, false)
+
+    // Registering milestone 1 would otherwise burn a VRF request and
+    // stick the case at finalize — the new check refuses it up front.
+    await expect(
+      adapter.connect(client).registerCase(escrowId, 1n, false)
+    ).to.be.revertedWithCustomError(adapter, "MilestoneNotDisputed")
+  })
+
+  it("registerCase rejects an out-of-range milestone index", async () => {
+    const ctx = await loadFixture(fixture)
+    const { adapter, vaultra, usdcToken, client, worker } = ctx
+
+    const escrowId = await createAndFundMilestoneEscrow(
+      vaultra,
+      usdcToken,
+      client,
+      worker,
+      [usdc("100")],
+    )
+    await vaultra.connect(worker).raiseDispute(escrowId, 0n)
+
+    await expect(
+      adapter.connect(client).registerCase(escrowId, 5n, false)
+    ).to.be.revertedWithCustomError(adapter, "InvalidMilestoneIndex")
+  })
+
+  it("registerCase rejects noMilestone=true on a milestone escrow", async () => {
+    const ctx = await loadFixture(fixture)
+    const { adapter, vaultra, usdcToken, client, worker } = ctx
+
+    const escrowId = await createAndFundMilestoneEscrow(
+      vaultra,
+      usdcToken,
+      client,
+      worker,
+      [usdc("100")],
+    )
+    await vaultra.connect(worker).raiseDispute(escrowId, 0n)
+
+    await expect(
+      adapter.connect(client).registerCase(escrowId, 0n, true)
+    ).to.be.revertedWithCustomError(adapter, "MilestoneShapeMismatch")
+  })
+
+  it("registerCase rejects noMilestone=false on a lump-sum escrow", async () => {
+    const ctx = await loadFixture(fixture)
+    const { adapter, vaultra, usdcToken, client, worker } = ctx
+
+    const escrowId = await createAndFundEscrow(vaultra, usdcToken, client, worker, usdc("100"))
+    await vaultra.connect(worker).raiseDisputeNoMilestone(escrowId)
+
+    await expect(
+      adapter.connect(client).registerCase(escrowId, 0n, false)
+    ).to.be.revertedWithCustomError(adapter, "MilestoneShapeMismatch")
   })
 })

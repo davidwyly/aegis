@@ -207,3 +207,42 @@ export async function createAndFundEscrow(
     .find((e) => e?.name === "EscrowCreated")
   return log!.args.escrowId as string
 }
+
+export async function createAndFundMilestoneEscrow(
+  vaultra: VaultraEscrow,
+  usdcToken: MockUSDC,
+  client: Signer,
+  worker: Signer,
+  milestoneAmounts: bigint[],
+): Promise<string> {
+  const workerAddr = await worker.getAddress()
+  const total = milestoneAmounts.reduce((a, b) => a + b, 0n)
+  await usdcToken
+    .connect(client)
+    .approve(await vaultra.getAddress(), totalUpfront(total))
+  const titles = milestoneAmounts.map((_, i) => `m${i}`)
+  const reqs = milestoneAmounts.map(() => "")
+  const tx = await vaultra
+    .connect(client)
+    .createEscrowWithMilestones(
+      "integration-milestones",
+      "round-trip test",
+      workerAddr,
+      ethers.ZeroAddress, // arbiter = adapter via eclipseDAO default
+      titles,
+      milestoneAmounts,
+      reqs,
+      PROPOSAL_DIGEST,
+    )
+  const receipt = await tx.wait()
+  const log = receipt!.logs
+    .map((l) => {
+      try {
+        return vaultra.interface.parseLog(l)
+      } catch {
+        return null
+      }
+    })
+    .find((e) => e?.name === "EscrowCreated")
+  return log!.args.escrowId as string
+}
