@@ -671,10 +671,7 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
 
         // Fail fast: if the eligible pool can't seat one arbiter, don't
         // pay VRF gas for a request that fulfillRandomWords would revert on.
-        // Uninitialized memory array is a length-0 array in Solidity; no
-        // allocation needed.
-        // slither-disable-next-line uninitialized-local
-        address[] memory noExclude;
+        address[] memory noExclude = new address[](0);
         if (_eligibleArbiterCount(partyA, partyB, noExclude) == 0) {
             revert NotEnoughArbiters();
         }
@@ -772,10 +769,7 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
     /// and stall-redraw (round 1, future). On a redraw, the prior
     /// arbiter is excluded from the eligible pool.
     function _drawOriginal(Case storage c, bytes32 caseId, uint256 seed) internal {
-        // Uninitialized memory array is length-0; only allocate when we
-        // actually need to push an exclusion (the redraw path).
-        // slither-disable-next-line uninitialized-local
-        address[] memory exclude;
+        address[] memory exclude = new address[](0);
         if (c.originalArbiter != address(0)) {
             exclude = new address[](1);
             exclude[0] = c.originalArbiter;
@@ -1088,13 +1082,12 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
         if (aRevealed) ++payableCount;
         if (bRevealed) ++payableCount;
 
-        // Cap check uses ceil(c.amount * perArbiterFeeBps / BPS) so the
-        // wei-scale rounding of the floor division never flips this into
-        // the wrong branch. Overflow bound: perArbiterFeeBps ≤ BPS so
-        // perArbiterCeil ≤ c.amount, and payableCount ≤ 3, so the
-        // subsequent multiplication is bounded by 3 * c.amount —
-        // ~333× more headroom than the original c.amount * perArbiterFeeBps
-        // intermediate (which itself overflows only past c.amount ≈ 10^74).
+        // Cap check uses ceil(numerator / BPS_DENOMINATOR) so wei-scale
+        // rounding of the floor division never flips us into the wrong
+        // branch. Since perArbiterFeeBps <= BPS_DENOMINATOR (enforced by
+        // MAX_PER_ARBITER_FEE_BPS), perArbiterCeil <= c.amount, so the
+        // subsequent perArbiterCeil * payableCount cannot overflow before
+        // the c.amount * perArbiterFeeBps numerator step itself would.
         // The share assignment keeps the floor so totalPayout never
         // exceeds totalPot.
         uint256 numerator = c.amount * p.perArbiterFeeBps;
