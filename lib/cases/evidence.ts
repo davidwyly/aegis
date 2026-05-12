@@ -2,7 +2,7 @@ import "server-only"
 import { createHash } from "node:crypto"
 import { and, eq, inArray, type SQL } from "drizzle-orm"
 import { db, schema } from "@/lib/db/client"
-import { isResolvedCaseStatus } from "@/lib/db/schema"
+import { resolveViewerVisibility } from "@/lib/cases/visibility"
 import type { SealedKey } from "@/lib/crypto/seal"
 
 export const EVIDENCE_MAX_BYTES = 2 * 1024 * 1024 // 2 MB
@@ -217,36 +217,19 @@ export async function listEvidenceForViewer(
   viewer: `0x${string}` | null,
   options: { limit?: number } = {},
 ): Promise<EvidenceListItem[]> {
-  if (!viewer) return []
-  const caseRow = await db.query.cases.findFirst({
-    where: eq(schema.cases.id, caseUuid),
-  })
-  if (!caseRow) return []
+  const visibility = await resolveViewerVisibility(caseUuid, viewer)
+  if (visibility === "none") return []
 
-  const v = viewer.toLowerCase()
-  const isParty =
-    v === caseRow.partyA.toLowerCase() || v === caseRow.partyB.toLowerCase()
-  const isResolved = isResolvedCaseStatus(caseRow.status)
-
-  // Choose the SQL predicate that matches the viewer's role. Falling
-  // through to `null` means "no rows visible" and we skip the SELECT
-  // entirely.
-  let where: SQL | null = null
-  if (isParty && !isResolved) {
-    where = and(
-      eq(schema.evidenceFiles.caseUuid, caseUuid),
-      eq(schema.evidenceFiles.uploaderAddress, v),
-    ) as SQL
-  } else if (isResolved) {
-    where = eq(schema.evidenceFiles.caseUuid, caseUuid)
-  } else {
-    const panel = await db.query.panelMembers.findFirst({
-      where: (p, { and, eq }) =>
-        and(eq(p.caseUuid, caseUuid), eq(p.panelistAddress, v)),
-    })
-    if (panel) where = eq(schema.evidenceFiles.caseUuid, caseUuid)
-  }
-  if (where === null) return []
+  // Push the visibility class into SQL so non-visible rows never come
+  // back from Postgres. `own` always implies a non-null viewer (per
+  // the helper contract).
+  const where: SQL =
+    visibility === "own"
+      ? (and(
+          eq(schema.evidenceFiles.caseUuid, caseUuid),
+          eq(schema.evidenceFiles.uploaderAddress, viewer!.toLowerCase()),
+        ) as SQL)
+      : eq(schema.evidenceFiles.caseUuid, caseUuid)
 
   const baseQuery = db
     .select({
