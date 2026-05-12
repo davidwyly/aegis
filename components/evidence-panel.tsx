@@ -35,7 +35,7 @@ const ERROR_LABELS: Record<string, string> = {
   MIME_NOT_ALLOWED: "File type not accepted (PDF, image, text, CSV, JSON).",
   FILE_EMPTY: "File is empty.",
   FILENAME_REQUIRED: "Missing filename.",
-  FILENAME_INVALID: "That filename isn't allowed — avoid '.', '..', or special characters.",
+  FILENAME_INVALID: "That filename isn't allowed — avoid '.', '..', or directory-traversal sequences.",
 }
 
 function formatSize(bytes: number) {

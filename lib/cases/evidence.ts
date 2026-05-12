@@ -1,6 +1,6 @@
 import "server-only"
 import { createHash } from "node:crypto"
-import { eq, inArray } from "drizzle-orm"
+import { and, eq, inArray, type SQL } from "drizzle-orm"
 import { db, schema } from "@/lib/db/client"
 
 export const EVIDENCE_MAX_BYTES = 2 * 1024 * 1024 // 2 MB
@@ -211,17 +211,50 @@ export async function uploadEvidence(
  *   - panelists can read all once the case exists
  *   - opposing party can only read post-resolution
  *   - public ledger never includes evidence pre-resolution
+ *
+ * The visibility predicate is pushed into SQL so non-visible rows are
+ * never returned, and an optional `limit` lets the ZIP route cap the
+ * fetch at cap+1 to detect over-cap cases without materialising the
+ * whole list.
  */
 export async function listEvidenceForViewer(
   caseUuid: string,
   viewer: `0x${string}` | null,
+  options: { limit?: number } = {},
 ): Promise<EvidenceListItem[]> {
+  if (!viewer) return []
   const caseRow = await db.query.cases.findFirst({
     where: eq(schema.cases.id, caseUuid),
   })
   if (!caseRow) return []
 
-  const all = await db
+  const v = viewer.toLowerCase()
+  const isParty =
+    v === caseRow.partyA.toLowerCase() || v === caseRow.partyB.toLowerCase()
+  const isResolved =
+    caseRow.status === "resolved" || caseRow.status === "default_resolved"
+
+  // Choose the SQL predicate that matches the viewer's role. Falling
+  // through to `null` means "no rows visible" and we skip the SELECT
+  // entirely.
+  let where: SQL | null = null
+  if (isParty && !isResolved) {
+    where = and(
+      eq(schema.evidenceFiles.caseUuid, caseUuid),
+      eq(schema.evidenceFiles.uploaderAddress, v),
+    ) as SQL
+  } else if (isResolved) {
+    where = eq(schema.evidenceFiles.caseUuid, caseUuid)
+  } else {
+    const panel = await db.query.panelMembers.findFirst({
+      where: (p, { and, eq }) =>
+        and(eq(p.caseUuid, caseUuid), eq(p.panelistAddress, v)),
+    })
+    if (panel) where = eq(schema.evidenceFiles.caseUuid, caseUuid)
+  }
+  if (where === null) return []
+
+  const baseQuery = db
     .select({
       id: schema.evidenceFiles.id,
       caseUuid: schema.evidenceFiles.caseUuid,
@@ -238,25 +271,13 @@ export async function listEvidenceForViewer(
       uploadedAt: schema.evidenceFiles.uploadedAt,
     })
     .from(schema.evidenceFiles)
-    .where(eq(schema.evidenceFiles.caseUuid, caseUuid))
+    .where(where)
 
-  if (!viewer) return []
-  const v = viewer.toLowerCase()
-  const isParty =
-    v === caseRow.partyA.toLowerCase() || v === caseRow.partyB.toLowerCase()
-  const isResolved =
-    caseRow.status === "resolved" || caseRow.status === "default_resolved"
-
-  if (isParty && !isResolved) {
-    return all.filter((e) => e.uploaderAddress.toLowerCase() === v) as EvidenceListItem[]
-  }
-
-  const isPanelist = await db.query.panelMembers.findFirst({
-    where: (p, { and, eq }) =>
-      and(eq(p.caseUuid, caseUuid), eq(p.panelistAddress, v)),
-  })
-  if (isPanelist || isResolved) return all as EvidenceListItem[]
-  return []
+  const rows =
+    options.limit !== undefined
+      ? await baseQuery.limit(options.limit)
+      : await baseQuery
+  return rows as EvidenceListItem[]
 }
 
 export interface EvidenceBlob {
@@ -315,29 +336,3 @@ export async function fetchEvidenceContentByIds(
   return new Map(rows.map((r) => [r.id, r.content]))
 }
 
-/**
- * Bulk fetch for the ZIP-bundle endpoint. Visibility gating runs through
- * listEvidenceForViewer; we then pull the content bytes in a single query
- * keyed by the visible ids.
- *
- * Deprecated for new code — prefer listEvidenceForViewer + cap +
- * fetchEvidenceContentByIds so caps are enforced before the content
- * fetch. Kept for now since older callers exist.
- */
-export async function listEvidenceWithContentForViewer(
-  caseUuid: string,
-  viewer: `0x${string}` | null,
-): Promise<EvidenceWithContent[]> {
-  // Short-circuit the visibility gating + the bulk content fetch for
-  // anonymous callers. listEvidenceForViewer would also return []
-  // eventually, but only after running the case + panel lookups; bailing
-  // here saves two DB roundtrips on every public-visitor request.
-  if (!viewer) return []
-  const summaries = await listEvidenceForViewer(caseUuid, viewer)
-  if (summaries.length === 0) return []
-  const byId = await fetchEvidenceContentByIds(summaries.map((s) => s.id))
-  return summaries.flatMap((s) => {
-    const content = byId.get(s.id)
-    return content ? [{ ...s, content }] : []
-  })
-}

@@ -41,12 +41,13 @@ export async function GET(
     return new Response("No evidence visible", { status: 404 })
   }
   // Two-pass: pull metadata-only summaries (no content bytea) first
-  // and apply caps on the viewer-scoped list. Doing the cap check
-  // case-wide would leak the case's evidence size to authenticated-
-  // but-unauthorized callers and 413 incorrectly when the viewer's
-  // own slice is under cap. The metadata fetch excludes the content
-  // column, so even a large evidence list is small in bytes.
-  const summaries = await listEvidenceForViewer(id, session.address)
+  // and apply caps on the viewer-scoped list. listEvidenceForViewer
+  // now pushes the visibility predicate into SQL AND honours an
+  // optional cap; we request MAX_BUNDLE_FILES+1 rows so that
+  // detecting cap+1 ⇒ 413 works without ever fetching a bigger list.
+  const summaries = await listEvidenceForViewer(id, session.address, {
+    limit: MAX_BUNDLE_FILES + 1,
+  })
   if (summaries.length === 0) {
     return new Response("No evidence visible", { status: 404 })
   }
