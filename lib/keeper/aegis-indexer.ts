@@ -406,7 +406,7 @@ async function applyArbiterRedrawn(
       ),
     )
 
-  await db
+  const insertedReplacement = await db
     .insert(schema.panelMembers)
     .values({
       caseUuid,
@@ -415,6 +415,19 @@ async function applyArbiterRedrawn(
       phase: prev.phase as "original" | "appeal",
     })
     .onConflictDoNothing()
+    .returning({ panelistAddress: schema.panelMembers.panelistAddress })
+  if (insertedReplacement.length === 0) {
+    // A historical row for (caseUuid, replacement) already exists
+    // (left earlier in this case's lifecycle). With cooldown=0 the
+    // contract can legally re-draw that address; in that case the DB
+    // mirror needs a reactivation upsert that resets committedAt /
+    // revealedAt / leftAt etc. That's a separate piece of work — log
+    // so an operator can see the case is in flight and the mirror is
+    // stale, rather than failing silently.
+    console.warn(
+      `[aegis-indexer] ArbiterRedrawn replacement ${replacement} already has a panel_members row for case ${caseUuid}; left as-is`,
+    )
+  }
 }
 
 async function findCaseUuid(
@@ -608,7 +621,7 @@ async function applyRecused(
         sql`${schema.panelMembers.leftAt} IS NULL`,
       ),
     )
-  await db
+  const insertedReplacement = await db
     .insert(schema.panelMembers)
     .values({
       caseUuid,
@@ -617,6 +630,16 @@ async function applyRecused(
       phase: prev.phase as "original" | "appeal",
     })
     .onConflictDoNothing()
+    .returning({ panelistAddress: schema.panelMembers.panelistAddress })
+  if (insertedReplacement.length === 0) {
+    // See applyArbiterRedrawn for the same situation: the replacement
+    // address already has a row for this case and a proper
+    // reactivation upsert isn't wired yet. Surface it via the log so
+    // an operator can intervene if it happens.
+    console.warn(
+      `[aegis-indexer] Recused replacement ${replacement} already has a panel_members row for case ${caseUuid}; left as-is`,
+    )
+  }
 }
 
 async function applyArbiterRegistered(
