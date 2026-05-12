@@ -81,6 +81,8 @@ contract VaultraAdapter is IArbitrableEscrow {
     using SafeERC20 for IERC20;
 
     uint8 private constant VAULTRA_STATUS_DISPUTED = 2;
+    // MilestoneStatus enum on VaultraEscrow: Pending=0, Released=1, Disputed=2.
+    uint8 private constant VAULTRA_MILESTONE_STATUS_DISPUTED = 2;
 
     address public immutable aegis;
     IVaultraEscrow public immutable vaultra;
@@ -107,6 +109,9 @@ contract VaultraAdapter is IArbitrableEscrow {
     error NotArbiter();
     error NotDisputed();
     error AlreadyRegistered();
+    error MilestoneShapeMismatch();
+    error InvalidMilestoneIndex();
+    error MilestoneNotDisputed();
 
     constructor(address _aegis, IVaultraEscrow _vaultra) {
         if (_aegis == address(0)) revert ZeroAddress();
@@ -142,11 +147,34 @@ contract VaultraAdapter is IArbitrableEscrow {
             ,
             uint8 status,
             ,
-            ,
-
+            bool hasMilestones,
+            uint256 milestonesCount
         ) = vaultra.getEscrow(escrowId);
         if (arbiter != address(this)) revert NotArbiter();
         if (status != VAULTRA_STATUS_DISPUTED) revert NotDisputed();
+
+        // Match Vaultra's resolveDispute* dispatch shape. Without these
+        // checks, anyone could register a case for a non-disputed milestone
+        // (or with the wrong shape), seat a panel via openDispute, then
+        // every finalize attempt reverts at vaultra.resolveDispute*. The
+        // VRF request gets burned and the Aegis case sits stuck.
+        if (noMilestone) {
+            if (hasMilestones) revert MilestoneShapeMismatch();
+            // resolveDisputeNoMilestone ignores milestoneIndex, but it
+            // is still hashed into the caseId. Without this check
+            // anyone could register a parallel Aegis case per index for
+            // the same underlying dispute — each one burns a VRF draw
+            // and the trailing cases stick at finalize time once the
+            // first resolves the escrow. Canonical form is 0.
+            if (milestoneIndex != 0) revert InvalidMilestoneIndex();
+        } else {
+            if (!hasMilestones) revert MilestoneShapeMismatch();
+            if (milestoneIndex >= milestonesCount) revert InvalidMilestoneIndex();
+            (, , uint8 milestoneStatus) = vaultra.getMilestone(escrowId, milestoneIndex);
+            if (milestoneStatus != VAULTRA_MILESTONE_STATUS_DISPUTED) {
+                revert MilestoneNotDisputed();
+            }
+        }
 
         caseId = _packCaseId(escrowId, milestoneIndex, noMilestone);
         if (_cases[caseId].registered) revert AlreadyRegistered();

@@ -72,28 +72,21 @@ translates:
 | Fee forwarding | Captures the ERC20 balance delta on itself during `applyArbitration` and forwards it to Aegis with `SafeERC20`, so Aegis's delta-based fee accounting captures the right amount. |
 | Resolve dispatch | Calls `resolveDispute` vs `resolveDisputeNoMilestone` based on the flag stored at registration. |
 
-`registerCase` is permissionless. It verifies the underlying escrow
-has the adapter as arbiter and is in `Disputed` state before recording
-the mapping. It does **not** verify that the specific
-`(milestoneIndex, noMilestone)` tuple matches an actually-disputed
-milestone — only escrow-level state is checked, while Vaultra's
-`resolveDispute` requires `milestone.status == Disputed` at line 370.
+`registerCase` is permissionless and validates the full set of
+conditions Vaultra's `resolveDispute*` would later enforce:
 
-The consequence is a known sharp edge: on an escrow with multiple
-milestones where only milestone 0 has been disputed, anyone can call
-`registerCase(escrowId, 1, false)` and `aegis.openDispute(...)`. VRF
-fires, a panel seats, the case proceeds — and then `Aegis.finalize`
-eventually calls `adapter.applyArbitration`, which calls
-`vaultra.resolveDispute(escrowId, 1, ...)`, which reverts
-`MilestoneNotDisputed`. The Aegis case is then stuck (every finalize
-attempt reverts) until manual intervention.
+- `escrow.arbiter == address(this)` — adapter is the registered arbiter.
+- `escrow.status == Disputed` — escrow-level dispute flag set.
+- `noMilestone` flag matches `escrow.hasMilestones` — refuses the
+  wrong-shape dispatch.
+- On the milestone path, `milestoneIndex < milestonesCount` and
+  `milestone.status == Disputed`.
 
-Tightening this would mean either reading `getMilestone(escrowId, idx).status`
-inside `registerCase`, or having `getDisputeContext` return `active=false`
-when the referenced milestone isn't disputed (so `openDispute` refuses
-to seat a panel in the first place). Filed as future hardening; the
-current invariant is "trust the keeper to only register tuples seen in
-a Vaultra `DisputeRaised` log."
+Without that last check, anyone could register a case for a
+non-disputed milestone on a disputed escrow, seat a panel via
+`openDispute`, and burn a VRF request — every `Aegis.finalize` would
+then revert at `vaultra.resolveDispute(escrowId, idx, ...)` with
+`MilestoneNotDisputed`, leaving the case permanently stuck.
 
 ---
 
