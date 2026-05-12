@@ -357,7 +357,19 @@ async function applyArbiterDrawn(
     // below makes it idempotent.
   }
 
-  await db
+  // Gate the deadline mirror on whether THIS event actually inserted
+  // a new row. On log replay (e.g. after a cursor reset) the insert
+  // hits the (caseUuid, panelistAddress) conflict and the `.returning`
+  // is empty — skip the mirror in that case.
+  //
+  // Why this matters: if we skipped the gate and replayed an ORIGINAL
+  // ArbiterDrawn after the original has already revealed, the
+  // `activeOriginals[0].revealedAt !== null` branch above would infer
+  // `phase = "appeal"`. If the appeal panel hasn't been seated yet
+  // (case is in `appealable_resolved`), `onchain.appealCommitDeadline`
+  // is 0, and we'd write epoch-zero deadlines to the DB, making
+  // auto-finalize treat the case as overdue.
+  const inserted = await db
     .insert(schema.panelMembers)
     .values({
       caseUuid,
@@ -366,6 +378,10 @@ async function applyArbiterDrawn(
       phase,
     })
     .onConflictDoNothing()
+    .returning({
+      panelistAddress: schema.panelMembers.panelistAddress,
+    })
+  if (inserted.length === 0) return
 
   // Mirror the live phase's deadlines from chain so cases.deadlineCommit
   // / cases.deadlineReveal always point at the currently-open window
@@ -397,6 +413,7 @@ async function applyArbiterDrawn(
     .set({
       deadlineCommit: new Date(Number(commitTs) * 1000),
       deadlineReveal: new Date(Number(revealTs) * 1000),
+      updatedAt: new Date(),
     })
     .where(eq(schema.cases.id, caseUuid))
 }
