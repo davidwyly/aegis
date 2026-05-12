@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server"
-import { listLedger } from "@/lib/cases/service"
+import { listLedger, MAX_LIMIT } from "@/lib/cases/service"
 import { getSession } from "@/lib/auth/session"
 import {
   isArbiterSafeCaseStatus,
@@ -33,9 +33,9 @@ function parsePositiveInt(
 export async function GET(req: Request) {
   const url = new URL(req.url)
   const chainId = parsePositiveInt(url.searchParams.get("chainId"), MAX_INT32)
-  // listLedger clamps limit to MAX_LIMIT internally, but reject
-  // out-of-range numbers up front so the error is honest.
-  const limit = parsePositiveInt(url.searchParams.get("limit"), 1_000)
+  // Use listLedger's exported MAX_LIMIT so the route's contract and
+  // the service's actual cap stay in lockstep.
+  const limit = parsePositiveInt(url.searchParams.get("limit"), MAX_LIMIT)
   const cursor = url.searchParams.get("cursor")
   const statusParam = url.searchParams.getAll("status")
 
@@ -47,7 +47,7 @@ export async function GET(req: Request) {
   }
   if (limit === null) {
     return NextResponse.json(
-      { error: "limit must be a positive integer ≤ 1000" },
+      { error: `limit must be a positive integer ≤ ${MAX_LIMIT}` },
       { status: 400 },
     )
   }

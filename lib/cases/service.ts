@@ -188,7 +188,7 @@ export interface ListLedgerResult {
   nextCursor: string | null
 }
 
-const MAX_LIMIT = 200
+export const MAX_LIMIT = 200
 const DEFAULT_LIMIT = 25
 
 function parseCursor(cursor: string | null | undefined): { ms: number; id: string } | null {
