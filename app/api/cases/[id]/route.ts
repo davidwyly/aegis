@@ -46,6 +46,16 @@ export async function GET(
     : {
         ...caseRow,
         status: sanitizeStatusForArbiter(caseRow.status),
+        // `deadlineCommit` / `deadlineReveal` only track the
+        // ORIGINAL phase's deadlines today — the indexer doesn't
+        // mirror the contract's `appealCommitDeadline` /
+        // `appealRevealDeadline` after the appeal panel is seated.
+        // A consumer who sees `status: "open"` with deadlines long
+        // past could infer this is an appeal case, defeating the
+        // status sanitization. Null them out until the indexer
+        // tracks per-phase deadlines (separate follow-up).
+        deadlineCommit: null,
+        deadlineReveal: null,
       }
 
   const panel = showRaw ? await getPanel(caseRow.id) : []
