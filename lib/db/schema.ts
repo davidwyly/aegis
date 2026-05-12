@@ -360,7 +360,7 @@ export const evidenceFiles = pgTable(
     // can be organised (e.g. "documents", "media", "exhibits"). Null/empty
     // renders as the "uncategorised" bucket in both the UI and ZIP
     // bundle. Server sanitises to filename-safe characters [A-Za-z0-9._-]
-    // and clamps to 64 chars (see trimGroupName in lib/cases/evidence.ts).
+    // and clamps to 64 chars (see sanitiseGroupName in lib/cases/evidence.ts).
     groupName: text("group_name"),
     mimeType: text("mime_type").notNull(),
     size: integer("size").notNull(),

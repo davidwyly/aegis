@@ -259,9 +259,34 @@ export interface EvidenceWithContent extends EvidenceListItem {
 }
 
 /**
+ * Bulk content fetch for a known set of evidence ids. Callers that need
+ * to apply count/byte caps should run listEvidenceForViewer first, cap
+ * the metadata-only list, and only then call this — that keeps oversized
+ * cases from pulling every `content` bytea into memory before the route
+ * realises it should return 413.
+ */
+export async function fetchEvidenceContentByIds(
+  ids: string[],
+): Promise<Map<string, Buffer>> {
+  if (ids.length === 0) return new Map()
+  const rows = await db
+    .select({
+      id: schema.evidenceFiles.id,
+      content: schema.evidenceFiles.content,
+    })
+    .from(schema.evidenceFiles)
+    .where(inArray(schema.evidenceFiles.id, ids))
+  return new Map(rows.map((r) => [r.id, r.content]))
+}
+
+/**
  * Bulk fetch for the ZIP-bundle endpoint. Visibility gating runs through
  * listEvidenceForViewer; we then pull the content bytes in a single query
  * keyed by the visible ids.
+ *
+ * Deprecated for new code — prefer listEvidenceForViewer + cap +
+ * fetchEvidenceContentByIds so caps are enforced before the content
+ * fetch. Kept for now since older callers exist.
  */
 export async function listEvidenceWithContentForViewer(
   caseUuid: string,
@@ -274,15 +299,7 @@ export async function listEvidenceWithContentForViewer(
   if (!viewer) return []
   const summaries = await listEvidenceForViewer(caseUuid, viewer)
   if (summaries.length === 0) return []
-  const ids = summaries.map((s) => s.id)
-  const rows = await db
-    .select({
-      id: schema.evidenceFiles.id,
-      content: schema.evidenceFiles.content,
-    })
-    .from(schema.evidenceFiles)
-    .where(inArray(schema.evidenceFiles.id, ids))
-  const byId = new Map(rows.map((r) => [r.id, r.content]))
+  const byId = await fetchEvidenceContentByIds(summaries.map((s) => s.id))
   return summaries.flatMap((s) => {
     const content = byId.get(s.id)
     return content ? [{ ...s, content }] : []

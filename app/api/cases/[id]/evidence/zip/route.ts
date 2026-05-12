@@ -1,6 +1,7 @@
 import JSZip from "jszip"
 import {
-  listEvidenceWithContentForViewer,
+  fetchEvidenceContentByIds,
+  listEvidenceForViewer,
   sanitiseGroupName,
 } from "@/lib/cases/evidence"
 import { getSession } from "@/lib/auth/session"
@@ -31,23 +32,31 @@ export async function GET(
 ) {
   const { id } = await params
   const session = await getSession()
-  const items = await listEvidenceWithContentForViewer(id, session.address ?? null)
-  if (items.length === 0) {
+  // Two-pass: pull metadata-only summaries first and enforce the
+  // count/byte caps BEFORE touching the content bytea. A pathological
+  // case with hundreds of MB of attachments would otherwise OOM the
+  // serverless runtime trying to load every blob just to return 413.
+  const summaries = await listEvidenceForViewer(id, session.address ?? null)
+  if (summaries.length === 0) {
     return new Response("No evidence visible", { status: 404 })
   }
-  if (items.length > MAX_BUNDLE_FILES) {
+  if (summaries.length > MAX_BUNDLE_FILES) {
     return new Response(
       `Bundle exceeds the ${MAX_BUNDLE_FILES}-file limit`,
       { status: 413 },
     )
   }
-  const totalBytes = items.reduce((n, it) => n + it.size, 0)
+  const totalBytes = summaries.reduce((n, it) => n + it.size, 0)
   if (totalBytes > MAX_BUNDLE_BYTES) {
     return new Response(
       `Bundle exceeds the ${MAX_BUNDLE_BYTES}-byte limit`,
       { status: 413 },
     )
   }
+  // Caps passed — now pull content in one bulk query.
+  const contentById = await fetchEvidenceContentByIds(
+    summaries.map((s) => s.id),
+  )
 
   const zip = new JSZip()
   const used = new Set<string>()
@@ -58,34 +67,60 @@ export async function GET(
   // same sanitiser at write time so the bundle is independently safe.
   const safeFolder = (raw: string | null): string =>
     sanitiseGroupName(raw) ?? "uncategorised"
-  const manifest = items.map((it) => {
+  // Same defense for the file portion of the ZIP entry. The upload path
+  // already normalises through trimFilename, but a tampered row could
+  // smuggle "..", ".", or path separators — any of which would let an
+  // extractor produce an entry like `documents/../foo` that escapes the
+  // extraction root. We reject those names outright and fall back to a
+  // synthetic id-prefixed name so the file still lands in the bundle.
+  const safeFile = (raw: string, id: string): string => {
+    const cleaned = raw
+      .replace(/[^A-Za-z0-9._-]/g, "_")
+      .replace(/^\.+/, "")
+      .slice(0, 200)
+    if (
+      cleaned.length === 0 ||
+      cleaned === "." ||
+      cleaned === ".." ||
+      cleaned.includes("..")
+    ) {
+      return `file-${id.slice(0, 8)}`
+    }
+    return cleaned
+  }
+  const manifest = summaries.flatMap((it) => {
+    const content = contentById.get(it.id)
+    if (!content) return []
     const folder = safeFolder(it.groupName)
+    const baseName = safeFile(it.fileName, it.id)
     // De-dupe colliding filenames within the same folder. First try the
-    // raw filename, then prepend a growing slice of the row's UUID until
+    // sanitised base, then prepend a growing slice of the row's UUID until
     // unique — handles the pathological case where another uploader's
     // file already happens to match the id-prefixed slug.
-    let entryName = `${folder}/${it.fileName}`
+    let entryName = `${folder}/${baseName}`
     if (used.has(entryName)) {
       let prefixLen = 8
       do {
-        entryName = `${folder}/${it.id.slice(0, prefixLen)}-${it.fileName}`
+        entryName = `${folder}/${it.id.slice(0, prefixLen)}-${baseName}`
         prefixLen += 4
       } while (used.has(entryName) && prefixLen <= it.id.length)
     }
     used.add(entryName)
-    zip.file(entryName, it.content)
-    return {
-      file: entryName,
-      role: it.role,
-      uploaderAddress: it.uploaderAddress,
-      uploadedAt: it.uploadedAt,
-      mimeType: it.mimeType,
-      size: it.size,
-      sha256: it.sha256,
-      isEncrypted: it.isEncrypted,
-      bodyNonce: it.bodyNonce,
-      sealedRecipients: it.sealedRecipients,
-    }
+    zip.file(entryName, content)
+    return [
+      {
+        file: entryName,
+        role: it.role,
+        uploaderAddress: it.uploaderAddress,
+        uploadedAt: it.uploadedAt,
+        mimeType: it.mimeType,
+        size: it.size,
+        sha256: it.sha256,
+        isEncrypted: it.isEncrypted,
+        bodyNonce: it.bodyNonce,
+        sealedRecipients: it.sealedRecipients,
+      },
+    ]
   })
   zip.file(
     "manifest.json",
