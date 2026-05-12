@@ -15,6 +15,7 @@ const ERROR_STATUS: Record<EvidenceError["code"], number> = {
   MIME_NOT_ALLOWED: 415,
   FILE_EMPTY: 400,
   FILENAME_REQUIRED: 400,
+  FILENAME_INVALID: 400,
 }
 
 export async function GET(

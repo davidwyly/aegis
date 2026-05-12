@@ -1,6 +1,6 @@
 import "server-only"
 import { createHash } from "node:crypto"
-import { eq, inArray } from "drizzle-orm"
+import { eq, inArray, sql } from "drizzle-orm"
 import { db, schema } from "@/lib/db/client"
 
 export const EVIDENCE_MAX_BYTES = 2 * 1024 * 1024 // 2 MB
@@ -60,7 +60,8 @@ export class EvidenceError extends Error {
       | "FILE_TOO_LARGE"
       | "MIME_NOT_ALLOWED"
       | "FILE_EMPTY"
-      | "FILENAME_REQUIRED",
+      | "FILENAME_REQUIRED"
+      | "FILENAME_INVALID",
   ) {
     super(code)
   }
@@ -135,8 +136,15 @@ export async function uploadEvidence(
   if (!EVIDENCE_ALLOWED_MIME.has(input.mimeType)) {
     throw new EvidenceError("MIME_NOT_ALLOWED")
   }
+  // "empty after trim" → REQUIRED; "non-empty but rejected by the
+  // sanitiser (e.g. '.', '..', traversal-bearing)" → INVALID. Lets the
+  // client tell users "please name this file" vs. "that name isn't
+  // allowed".
+  if (input.fileName.trim().length === 0) {
+    throw new EvidenceError("FILENAME_REQUIRED")
+  }
   const fileName = sanitiseFileName(input.fileName)
-  if (!fileName) throw new EvidenceError("FILENAME_REQUIRED")
+  if (!fileName) throw new EvidenceError("FILENAME_INVALID")
   const groupName = sanitiseGroupName(input.groupName)
 
   const caseRow = await db.query.cases.findFirst({
@@ -283,6 +291,32 @@ export async function downloadEvidence(
 
 export interface EvidenceWithContent extends EvidenceListItem {
   content: Buffer
+}
+
+/**
+ * Cheap pre-flight for the ZIP route: returns (rowCount, totalBytes)
+ * for the case without loading any rows, so the route can fail fast
+ * before listEvidenceForViewer materialises the metadata list. The
+ * count is case-wide (no viewer filtering) — visible-to-viewer counts
+ * are always ≤ the case-wide count, so over-cap on the case-wide count
+ * means over-cap on anything any viewer would see. A non-spammed case
+ * fits comfortably under the caps and the preflight is a no-op.
+ */
+export async function evidenceCasePreflight(caseUuid: string): Promise<{
+  count: number
+  totalBytes: number
+}> {
+  const [row] = await db
+    .select({
+      count: sql<number>`count(*)::int`,
+      totalBytes: sql<number>`coalesce(sum(${schema.evidenceFiles.size}),0)::bigint`,
+    })
+    .from(schema.evidenceFiles)
+    .where(eq(schema.evidenceFiles.caseUuid, caseUuid))
+  // SUM returns a bigint via the cast; coerce to number — sizes are
+  // already bounded by EVIDENCE_MAX_BYTES per row, so the total fits
+  // comfortably in a double.
+  return { count: row?.count ?? 0, totalBytes: Number(row?.totalBytes ?? 0) }
 }
 
 /**
