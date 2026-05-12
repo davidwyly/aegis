@@ -41,7 +41,7 @@ export async function GET(req: Request) {
 
   if (chainId === null) {
     return NextResponse.json(
-      { error: "chainId must be a positive integer ≤ 2147483647" },
+      { error: `chainId must be a positive integer ≤ ${MAX_INT32}` },
       { status: 400 },
     )
   }

@@ -83,14 +83,13 @@ describe("isArbiterSafeCaseStatus", () => {
     expect(isArbiterSafeCaseStatus("appeal_awaiting_panel")).toBe(false)
   })
 
-  it("accepts all non-appeal statuses", () => {
-    expect(isArbiterSafeCaseStatus("awaiting_panel")).toBe(true)
-    expect(isArbiterSafeCaseStatus("open")).toBe(true)
-    expect(isArbiterSafeCaseStatus("revealing")).toBe(true)
-    expect(isArbiterSafeCaseStatus("appealable_resolved")).toBe(true)
-    expect(isArbiterSafeCaseStatus("resolved")).toBe(true)
-    expect(isArbiterSafeCaseStatus("default_resolved")).toBe(true)
-    expect(isArbiterSafeCaseStatus("stalled")).toBe(true)
+  it("accepts every CASE_STATUSES value that doesn't start with appeal_", () => {
+    // Drift-proof: iterate the canonical tuple rather than a
+    // hand-picked subset. Future statuses get covered automatically.
+    for (const s of CASE_STATUSES) {
+      const expected = !s.startsWith("appeal_")
+      expect(isArbiterSafeCaseStatus(s)).toBe(expected)
+    }
   })
 
   it("rejects unknown strings", () => {
