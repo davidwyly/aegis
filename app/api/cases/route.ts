@@ -68,7 +68,8 @@ export async function GET(req: Request) {
   if (invalidStatuses.length > 0) {
     return NextResponse.json(
       {
-        error: `invalid status filter(s): ${invalidStatuses.join(", ")}`,
+        error: "invalid status filter(s)",
+        invalidStatuses,
       },
       { status: 400 },
     )
