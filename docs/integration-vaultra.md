@@ -1,7 +1,11 @@
 # Plugging Vaultra into Aegis
 
-This is the one-pager. The Aegis-side rationale lives in the design plan;
-this doc is just the pragmatic checklist.
+This is the one-pager runbook — deploy order, smoke test, ops
+dependencies. For the cross-repo architecture (caseId contract, fee
+plumbing, vendored-escrow sync, adapter rotation), see
+[`integration-architecture.md`](./integration-architecture.md). Vaultra's
+side of the same picture lives in
+[its `docs/aegis-integration.md`](https://github.com/davidwyly/vaultra/blob/main/docs/aegis-integration.md).
 
 ## What you need before you start
 
@@ -136,8 +140,10 @@ pnpm keeper
    again. The court calls `VaultraAdapter.applyArbitration(...)`,
    which calls `Vaultra.resolveDispute*` with the panel's verdict.
    Vaultra pays the 2.5%–5% arbiter cut to the adapter, which
-   forwards it to Aegis, which credits 80% to revealing panelists
-   and 20% to the treasury.
+   forwards it to Aegis, which splits the pot per `_settleNoAppeal`
+   (50% arbiter / 50% party rebate) or `_settleAppeal` (per-arbiter
+   target capped by `policy.perArbiterFeeBps`, remainder rebated).
+   See `integration-architecture.md` §6.4 for the full breakdown.
 
 If an appeal is filed, see `docs/security-review.md` (F-07) and the
 `README.md` "Appeals" section for the upheld / overturned paths.
