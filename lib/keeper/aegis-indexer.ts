@@ -9,7 +9,7 @@ import {
   type Hex,
   type PublicClient,
 } from "viem"
-import { eq, and, sql } from "drizzle-orm"
+import { and, eq, isNull } from "drizzle-orm"
 
 import { db, schema } from "@/lib/db/client"
 import { viemChainFor } from "@/lib/chains"
@@ -313,7 +313,7 @@ async function applyArbiterDrawn(
       and(
         eq(schema.panelMembers.caseUuid, caseUuid),
         eq(schema.panelMembers.phase, "original"),
-        sql`${schema.panelMembers.leftAt} IS NULL`,
+        isNull(schema.panelMembers.leftAt),
       ),
     )
 
@@ -331,7 +331,7 @@ async function applyArbiterDrawn(
           and(
             eq(schema.panelMembers.caseUuid, caseUuid),
             eq(schema.panelMembers.phase, "appeal"),
-            sql`${schema.panelMembers.leftAt} IS NULL`,
+            isNull(schema.panelMembers.leftAt),
           ),
         )
       seat = activeAppeals.length
@@ -347,7 +347,7 @@ async function applyArbiterDrawn(
           and(
             eq(schema.panelMembers.caseUuid, caseUuid),
             eq(schema.panelMembers.panelistAddress, og.panelistAddress),
-            sql`${schema.panelMembers.leftAt} IS NULL`,
+            isNull(schema.panelMembers.leftAt),
           ),
         )
     }
@@ -402,7 +402,7 @@ async function applyArbiterRedrawn(
       and(
         eq(schema.panelMembers.caseUuid, caseUuid),
         eq(schema.panelMembers.panelistAddress, previous),
-        sql`${schema.panelMembers.leftAt} IS NULL`,
+        isNull(schema.panelMembers.leftAt),
       ),
     )
 
@@ -618,7 +618,7 @@ async function applyRecused(
       and(
         eq(schema.panelMembers.caseUuid, caseUuid),
         eq(schema.panelMembers.panelistAddress, recused),
-        sql`${schema.panelMembers.leftAt} IS NULL`,
+        isNull(schema.panelMembers.leftAt),
       ),
     )
   const insertedReplacement = await db
