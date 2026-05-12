@@ -320,17 +320,30 @@ export const briefBodySchema = z
   .min(1, "Brief is empty")
   .max(8_000, "Brief too long (8 KB max)")
 
+// Branded hex parser — proves the `0x...` shape at runtime, and brands
+// the output so the DB column type (`0x${string}`) is satisfied without
+// downstream casts. Requires an even number of hex digits so the bytes
+// round-trip through `hexToBytes` without failing later.
+const hex = z
+  .string()
+  .regex(/^0x([a-fA-F0-9]{2})+$/)
+  .transform((s) => s as `0x${string}`)
+const hex64 = z
+  .string()
+  .regex(/^0x[a-fA-F0-9]{64}$/)
+  .transform((s) => s as `0x${string}`)
+
 /** Sealed-brief shape — mirrors `lib/crypto/seal.ts`'s SealedBrief. */
 export const sealedBriefSchema = z.object({
-  bodyNonce: z.string().regex(/^0x[a-fA-F0-9]+$/),
-  bodyCiphertext: z.string().regex(/^0x[a-fA-F0-9]+$/),
+  bodyNonce: hex,
+  bodyCiphertext: hex,
   recipients: z
     .array(
       z.object({
-        recipientPubkey: z.string().regex(/^0x[a-fA-F0-9]{64}$/),
-        ephemeralPubkey: z.string().regex(/^0x[a-fA-F0-9]{64}$/),
-        nonce: z.string().regex(/^0x[a-fA-F0-9]+$/),
-        wrapped: z.string().regex(/^0x[a-fA-F0-9]+$/),
+        recipientPubkey: hex64,
+        ephemeralPubkey: hex64,
+        nonce: hex,
+        wrapped: hex,
       }),
     )
     .min(1)

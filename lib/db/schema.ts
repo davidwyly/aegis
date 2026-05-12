@@ -16,6 +16,7 @@ import {
   jsonb,
 } from "drizzle-orm/pg-core"
 import { sql, type InferSelectModel, type InferInsertModel } from "drizzle-orm"
+import type { SealedBrief, SealedKey } from "@/lib/crypto/seal"
 
 // Custom bytea type — Postgres binary blob with Buffer round-trip. Used
 // for inline evidence storage (small files only; >2 MB belongs in object
@@ -301,7 +302,7 @@ export const briefs = pgTable(
     // key + AES-GCM body ciphertext). v1 alpha: encrypted briefs are NOT
     // versioned in brief_versions.
     isEncrypted: boolean("is_encrypted").notNull().default(false),
-    sealed: jsonb("sealed"),
+    sealed: jsonb("sealed").$type<SealedBrief>(),
     submittedAt: timestamp("submitted_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -373,7 +374,7 @@ export const evidenceFiles = pgTable(
     // sealedRecipients carries the per-recipient wrapped key blobs.
     isEncrypted: boolean("is_encrypted").notNull().default(false),
     bodyNonce: text("body_nonce"), // 12-byte AES-GCM nonce, hex
-    sealedRecipients: jsonb("sealed_recipients"), // SealedKey[] from lib/crypto/seal
+    sealedRecipients: jsonb("sealed_recipients").$type<SealedKey[]>(),
     uploadedAt: timestamp("uploaded_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
