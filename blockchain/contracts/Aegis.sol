@@ -1084,14 +1084,13 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
 
         // Cap check uses ceil(c.amount * perArbiterFeeBps / BPS) so the
         // wei-scale rounding of the floor division never flips this into
-        // the wrong branch. Overflow boundary is identical to the original
-        // form: the intermediate c.amount * perArbiterFeeBps already
-        // existed, and the subsequent perArbiterCeil * payableCount cannot
-        // exceed it (perArbiterCeil ≤ c.amount, payableCount ≤ 3). The
-        // share assignment keeps the floor so totalPayout never exceeds
-        // totalPot.
-        //
-        // slither-disable-next-line divide-before-multiply
+        // the wrong branch. Overflow bound: perArbiterFeeBps ≤ BPS so
+        // perArbiterCeil ≤ c.amount, and payableCount ≤ 3, so the
+        // subsequent multiplication is bounded by 3 * c.amount —
+        // ~333× more headroom than the original c.amount * perArbiterFeeBps
+        // intermediate (which itself overflows only past c.amount ≈ 10^74).
+        // The share assignment keeps the floor so totalPayout never
+        // exceeds totalPot.
         uint256 numerator = c.amount * p.perArbiterFeeBps;
         uint256 perArbiterCeil = (numerator + BPS_DENOMINATOR - 1) / BPS_DENOMINATOR;
         uint256 perArbiterShare;
