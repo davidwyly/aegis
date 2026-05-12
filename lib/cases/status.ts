@@ -55,6 +55,14 @@ function isLeakingAppealStatus(s: CaseStatus): s is LeakingAppealStatus {
   return s in APPEAL_STATUS_MAP
 }
 
-export function sanitizeStatusForArbiter(status: CaseStatus): CaseStatus {
+// A `CaseStatus` minus the appeal_* variants — the privacy invariant
+// expressed in the type system. Functions and shapes that flow to
+// arbiters should use this type rather than the raw `CaseStatus`, so
+// the compiler refuses to assign a leaking value in the first place.
+export type ArbiterSafeCaseStatus = Exclude<CaseStatus, LeakingAppealStatus>
+
+export function sanitizeStatusForArbiter(
+  status: CaseStatus,
+): ArbiterSafeCaseStatus {
   return isLeakingAppealStatus(status) ? APPEAL_STATUS_MAP[status] : status
 }

@@ -4,17 +4,19 @@ import { db, schema } from "@/lib/db/client"
 import {
   CASE_STATUSES,
   sanitizeStatusForArbiter,
+  type ArbiterSafeCaseStatus,
   type CaseStatus,
 } from "@/lib/cases/status"
 
 // De novo blindness: the queue is arbiter-facing by definition, so
-// the response shape never carries `phase`, and `status` is always
-// sanitized to base values (no appeal_* leakage).
+// the response shape never carries `phase`, and `status` is the
+// arbiter-safe variant — the type system rejects any attempt to
+// write a raw `appeal_*` value into this field.
 export interface QueueItem {
   caseUuid: string
   caseId: string
   chainId: number
-  status: CaseStatus
+  status: ArbiterSafeCaseStatus
   seat: number
   deadlineCommit: Date | null
   deadlineReveal: Date | null
