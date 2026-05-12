@@ -1082,14 +1082,22 @@ contract Aegis is AccessControl, ReentrancyGuard, VRFConsumer {
         if (aRevealed) ++payableCount;
         if (bRevealed) ++payableCount;
 
-        // Cap check is multiplied-out to avoid divide-before-multiply
-        // rounding (Slither). The unrounded target per arbiter is
-        // c.amount * perArbiterFeeBps / BPS_DENOMINATOR; the share
-        // assigned to claimable still uses the rounded value so that
-        // totalPayout never exceeds totalPot.
+        // Cap check uses ceil(c.amount * perArbiterFeeBps / BPS) so the
+        // wei-scale rounding of the floor division never flips this into
+        // the wrong branch. Overflow boundary is identical to the original
+        // form: the intermediate c.amount * perArbiterFeeBps already
+        // existed, and the subsequent perArbiterCeil * payableCount cannot
+        // exceed it (perArbiterCeil ≤ c.amount, payableCount ≤ 3). The
+        // share assignment keeps the floor so totalPayout never exceeds
+        // totalPot.
+        //
+        // slither-disable-next-line divide-before-multiply
+        uint256 numerator = c.amount * p.perArbiterFeeBps;
+        uint256 perArbiterCeil = (numerator + BPS_DENOMINATOR - 1) / BPS_DENOMINATOR;
         uint256 perArbiterShare;
-        if (c.amount * p.perArbiterFeeBps * payableCount <= totalPot * BPS_DENOMINATOR) {
-            perArbiterShare = (c.amount * p.perArbiterFeeBps) / BPS_DENOMINATOR;
+        // slither-disable-next-line divide-before-multiply
+        if (perArbiterCeil * payableCount <= totalPot) {
+            perArbiterShare = numerator / BPS_DENOMINATOR;
         } else {
             // Pot too small for the policy target — split equally among
             // payable arbiters. Everyone gets the same reduced share;
