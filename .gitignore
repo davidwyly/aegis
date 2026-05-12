@@ -33,3 +33,6 @@ Thumbs.db
 /.local-pg-data/
 /screenshots-v2/
 /screenshots-v3/
+
+# Security tooling (Slither venv — recreate via python3 -m venv)
+/.venv-slither/

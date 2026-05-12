@@ -862,7 +862,7 @@ export const aegisAbi = [
         "type": "uint16"
       },
       {
-        "indexed": false,
+        "indexed": true,
         "internalType": "address",
         "name": "treasury",
         "type": "address"
